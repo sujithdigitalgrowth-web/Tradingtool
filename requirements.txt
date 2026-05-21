@@ -9,3 +9,5 @@ requests
 websocket-client
 logzero
 schedule
+gunicorn
+yfinance

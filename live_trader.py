@@ -8,6 +8,23 @@ import pandas as pd, numpy as np
 from datetime import date, datetime, timedelta
 from logzero import logger
 
+# ── Telegram alerts ───────────────────────────────────────────────
+_TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+_TG_CHAT  = os.getenv("TELEGRAM_CHAT_ID",   "")
+
+def _tg(msg: str):
+    """Fire-and-forget Telegram message. Silently drops on any error."""
+    if not _TG_TOKEN or not _TG_CHAT:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{_TG_TOKEN}/sendMessage",
+            json={"chat_id": _TG_CHAT, "text": msg, "parse_mode": "HTML"},
+            timeout=5,
+        )
+    except Exception:
+        pass
+
 import backtest as bt
 from angel_data import (
     _fetch_intraday, _fetch_daily,
@@ -370,7 +387,15 @@ class AngelTrader:
             }
             self.last_signal = "buy" if signal == "BUY_CE" else "sell"
 
+        lots = qty // bt.LOT_SIZE
         logger.info(f"Position opened: {symbol} {qty}@{entry_ltp}")
+        _tg(f"🟢 <b>TRADE ENTRY</b>\n"
+            f"Symbol : {symbol}\n"
+            f"Type   : {opt_type}\n"
+            f"Lots   : {lots} ({qty} qty)\n"
+            f"LTP    : ₹{entry_ltp:.2f}\n"
+            f"Spot   : ₹{spot:.2f}\n"
+            f"Time   : {datetime.now().strftime('%H:%M')}")
         self._save_state()
         return True
 
@@ -412,7 +437,15 @@ class AngelTrader:
             self.position  = _empty_pos()
             self.last_signal = None
 
+        icon = "✅" if pnl >= 0 else "🔴"
         logger.info(f"Position closed: {reason} ltp={ltp} pnl={pnl}")
+        _tg(f"{icon} <b>TRADE EXIT — {reason}</b>\n"
+            f"Symbol : {pos['symbol']}\n"
+            f"Entry  : ₹{pos['entry_price']:.2f}  Exit: ₹{ltp:.2f}\n"
+            f"Qty    : {pos['qty']}\n"
+            f"P&L    : {'+'if pnl>=0 else ''}₹{pnl:,.2f}\n"
+            f"Daily  : {'+'if self.daily_pnl>=0 else ''}₹{self.daily_pnl:,.2f}\n"
+            f"Time   : {datetime.now().strftime('%H:%M')}")
         self._save_state()
 
     def _partial_exit(self, ltp):
@@ -443,6 +476,12 @@ class AngelTrader:
             self.position["partial_done"] = True
 
         logger.info(f"Partial exit {qty} units @{ltp} pnl={pnl}")
+        _tg(f"🟡 <b>PARTIAL EXIT +20%</b>\n"
+            f"Symbol : {pos['symbol']}\n"
+            f"Sold   : {qty} qty (1 lot)\n"
+            f"LTP    : ₹{ltp:.2f}  P&L: +₹{pnl:,.2f}\n"
+            f"Remaining: {pos['qty'] - qty} qty — running to TARGET\n"
+            f"Time   : {datetime.now().strftime('%H:%M')}")
         self._save_state()
 
     # ── Position monitoring ───────────────────────────────────────

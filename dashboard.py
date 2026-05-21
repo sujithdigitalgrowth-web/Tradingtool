@@ -840,11 +840,24 @@ function showDay(r){
 def index():
     return render_template_string(TEMPLATE)
 
+@app.route("/health")
+def health():
+    try:
+        t = get_trader()
+        return jsonify({
+            "status"   : "ok",
+            "connected": t.connected,
+            "running"  : t._running,
+            "time"     : datetime.now().strftime("%H:%M:%S"),
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "detail": str(e)}), 500
+
 
 if __name__ == "__main__":
-    # Pre-warm trader on startup
     get_trader()
-    print("\n  Dashboard : http://localhost:5000")
+    port = int(os.environ.get("PORT", 5000))
+    print(f"\n  Dashboard : http://localhost:{port}")
     print("  Live tab  : start/stop trading, see live P&L")
     print("  Backtest  : run range analysis\n")
-    app.run(debug=False, port=5000, threaded=True)
+    app.run(debug=False, host="0.0.0.0", port=port, threaded=True)
