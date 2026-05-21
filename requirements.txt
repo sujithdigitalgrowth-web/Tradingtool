@@ -1,0 +1,11 @@
+smartapi-python
+pyotp
+python-dotenv
+pandas
+numpy
+flask
+flask-socketio
+requests
+websocket-client
+logzero
+schedule
