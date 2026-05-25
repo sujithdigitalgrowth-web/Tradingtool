@@ -572,19 +572,18 @@ class AngelTrader:
                         and not self.position["active"]
                         and self.trade_count < self.max_trades
                         and not (bt.V2_SKIP_THURSDAY and date.today().weekday() == 3)):
+                    # Always update timing so dashboard shows loop is alive
+                    next_t = _next_candle(now)
+                    self.sig_info["time"]       = now.strftime("%H:%M:%S")
+                    self.sig_info["next_check"] = next_t.strftime("%H:%M")
                     try:
                         self.get_balance()
                         self.get_nifty_ltp()
                         df_nbees, df_1d, df_bnf, df_vix = self._fetch_live_data()
                         signal, vix = self._check_signal(df_nbees, df_1d, df_bnf, df_vix)
 
-                        next_t = _next_candle(now)
-                        self.sig_info = {
-                            "signal"    : signal,
-                            "vix"       : vix,
-                            "time"      : now.strftime("%H:%M:%S"),
-                            "next_check": next_t.strftime("%H:%M"),
-                        }
+                        self.sig_info.update({"signal": signal, "vix": vix})
+                        self.last_error = None  # clear old errors on success
 
                         if signal:
                             logger.info(f"Signal: {signal}")

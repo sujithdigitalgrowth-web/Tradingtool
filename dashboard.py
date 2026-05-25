@@ -346,6 +346,7 @@ TEMPLATE = r"""
         <p id="sig-next" class="font-bold text-gray-600">—</p>
       </div>
     </div>
+    <div id="sig-error" class="hidden mt-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded px-3 py-2"></div>
   </div>
 
   <!-- ── Active Position ── -->
@@ -657,14 +658,13 @@ function refreshLive(){
     document.getElementById('live-trade-badge').textContent =
       trades.length ? trades.length+' trade'+(trades.length>1?'s':'') : '';
 
-    // Error banner
-    if(s.last_error && !document.getElementById('err-banner')){
-      const b=document.createElement('div');
-      b.id='err-banner';
-      b.className='fixed bottom-4 right-4 bg-red-100 border border-red-300 text-red-800 text-xs px-4 py-2 rounded-lg shadow';
-      b.textContent='Error: '+s.last_error;
-      document.body.appendChild(b);
-      setTimeout(()=>b.remove(),8000);
+    // Error in signal monitor (persistent until cleared)
+    const errBox = document.getElementById('sig-error');
+    if(s.last_error){
+      errBox.textContent = 'Error: '+s.last_error;
+      errBox.classList.remove('hidden');
+    } else {
+      errBox.classList.add('hidden');
     }
   }).catch(()=>{});
 }
