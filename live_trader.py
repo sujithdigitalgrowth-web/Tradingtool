@@ -139,6 +139,7 @@ class AngelTrader:
         self.max_trades   = 2
         self.lots         = 1
         self.enabled      = False
+        self.paper_mode   = False   # True = simulate orders, no real API calls
 
         # Daily state
         self.position     = _empty_pos()
@@ -371,12 +372,15 @@ class AngelTrader:
             logger.error(f"_enter: cannot get LTP for {symbol}")
             return False
 
-        resp = self._order(symbol, token, qty, "BUY")
-        if not (resp and resp.get("status")):
-            self.last_error = f"Buy order failed: {resp}"
-            return False
+        if self.paper_mode:
+            order_id = "PAPER"
+        else:
+            resp = self._order(symbol, token, qty, "BUY")
+            if not (resp and resp.get("status")):
+                self.last_error = f"Buy order failed: {resp}"
+                return False
+            order_id = resp.get("data", {}).get("orderid", "—")
 
-        order_id = resp.get("data", {}).get("orderid", "—")
         with self._lock:
             self.position = {
                 "active"       : True,
@@ -395,12 +399,14 @@ class AngelTrader:
                 "live_ltp"     : entry_ltp,
                 "live_pnl"     : 0.0,
                 "order_id"     : order_id,
+                "paper"        : self.paper_mode,
             }
             self.last_signal = "buy" if signal == "BUY_CE" else "sell"
 
         lots = qty // bt.LOT_SIZE
-        logger.info(f"Position opened: {symbol} {qty}@{entry_ltp}")
-        _tg(f"🟢 <b>TRADE ENTRY</b>\n"
+        tag  = "[PAPER] " if self.paper_mode else ""
+        logger.info(f"{tag}Position opened: {symbol} {qty}@{entry_ltp}")
+        _tg(f"{'📋' if self.paper_mode else '🟢'} <b>{tag}TRADE ENTRY</b>\n"
             f"Symbol : {symbol}\n"
             f"Type   : {opt_type}\n"
             f"Lots   : {lots} ({qty} qty)\n"
@@ -420,11 +426,12 @@ class AngelTrader:
         if ltp is None:
             ltp = self.get_option_ltp(pos["symbol"], pos["token"]) or pos["entry_price"]
 
-        resp = self._order(pos["symbol"], pos["token"], pos["qty"], "SELL")
-        if not (resp and resp.get("status")):
-            self.last_error = f"Sell order failed for {pos['symbol']}: {resp}"
-            logger.error(self.last_error)
-            return
+        if not self.paper_mode:
+            resp = self._order(pos["symbol"], pos["token"], pos["qty"], "SELL")
+            if not (resp and resp.get("status")):
+                self.last_error = f"Sell order failed for {pos['symbol']}: {resp}"
+                logger.error(self.last_error)
+                return
 
         pnl = round((ltp - pos["entry_price"]) * pos["qty"], 2)
         with self._lock:
@@ -440,6 +447,7 @@ class AngelTrader:
                 "qty"       : pos["qty"],
                 "pnl"       : pnl,
                 "reason"    : reason,
+                "paper"     : self.paper_mode,
             })
             self.daily_pnl   += pnl
             self.trade_count += 1
@@ -448,9 +456,10 @@ class AngelTrader:
             self.position  = _empty_pos()
             self.last_signal = None
 
+        tag  = "[PAPER] " if self.paper_mode else ""
         icon = "✅" if pnl >= 0 else "🔴"
-        logger.info(f"Position closed: {reason} ltp={ltp} pnl={pnl}")
-        _tg(f"{icon} <b>TRADE EXIT — {reason}</b>\n"
+        logger.info(f"{tag}Position closed: {reason} ltp={ltp} pnl={pnl}")
+        _tg(f"{icon} <b>{tag}TRADE EXIT — {reason}</b>\n"
             f"Symbol : {pos['symbol']}\n"
             f"Entry  : ₹{pos['entry_price']:.2f}  Exit: ₹{ltp:.2f}\n"
             f"Qty    : {pos['qty']}\n"
@@ -462,10 +471,12 @@ class AngelTrader:
     def _partial_exit(self, ltp):
         pos = self.position
         qty = bt.LOT_SIZE
-        resp = self._order(pos["symbol"], pos["token"], qty, "SELL")
-        if not (resp and resp.get("status")):
-            logger.error(f"Partial sell failed: {resp}")
-            return
+
+        if not self.paper_mode:
+            resp = self._order(pos["symbol"], pos["token"], qty, "SELL")
+            if not (resp and resp.get("status")):
+                logger.error(f"Partial sell failed: {resp}")
+                return
 
         pnl = round((ltp - pos["entry_price"]) * qty, 2)
         with self._lock:
@@ -481,13 +492,15 @@ class AngelTrader:
                 "qty"       : qty,
                 "pnl"       : pnl,
                 "reason"    : "PARTIAL_TP",
+                "paper"     : self.paper_mode,
             })
             self.daily_pnl         += pnl
             self.position["qty"]   -= qty
             self.position["partial_done"] = True
 
-        logger.info(f"Partial exit {qty} units @{ltp} pnl={pnl}")
-        _tg(f"🟡 <b>PARTIAL EXIT +20%</b>\n"
+        tag = "[PAPER] " if self.paper_mode else ""
+        logger.info(f"{tag}Partial exit {qty} units @{ltp} pnl={pnl}")
+        _tg(f"🟡 <b>{tag}PARTIAL EXIT +20%</b>\n"
             f"Symbol : {pos['symbol']}\n"
             f"Sold   : {qty} qty (1 lot)\n"
             f"LTP    : ₹{ltp:.2f}  P&L: +₹{pnl:,.2f}\n"
@@ -633,13 +646,14 @@ class AngelTrader:
 
     # ── Public API ────────────────────────────────────────────────
 
-    def start(self, max_trades: int = 2, lots: int = 1):
+    def start(self, max_trades: int = 2, lots: int = 1, paper_mode: bool = False):
         """Enable trading and launch background threads."""
         if self._obj is None:
             self.login()
 
         self.max_trades       = max_trades
         self.lots             = lots
+        self.paper_mode       = paper_mode
         self.enabled          = True
         self._monitoring_only = False
 
@@ -682,9 +696,17 @@ class AngelTrader:
         wr  = round(self.win_count / self.trade_count * 100) if self.trade_count else 0
 
         if pos["active"]:
-            status = "LIVE" if (self.enabled and not self._monitoring_only) else "MONITORING"
+            if self.paper_mode:
+                status = "PAPER"
+            elif self.enabled and not self._monitoring_only:
+                status = "LIVE"
+            else:
+                status = "MONITORING"
         elif self._running:
-            status = "LIVE" if self.enabled else "MONITORING"
+            if self.paper_mode:
+                status = "PAPER"
+            else:
+                status = "LIVE" if self.enabled else "MONITORING"
         else:
             status = "STOPPED"
 
@@ -693,7 +715,8 @@ class AngelTrader:
             "connected"   : self.connected,
             "enabled"     : self.enabled,
             "monitoring"  : self._monitoring_only,
-            "config"      : {"max_trades": self.max_trades, "lots": self.lots},
+            "paper_mode"  : self.paper_mode,
+            "config"      : {"max_trades": self.max_trades, "lots": self.lots, "paper": self.paper_mode},
             "market"      : {"nifty_ltp": self.nifty_ltp, "vix": self.sig_info.get("vix")},
             "signal"      : self.sig_info,
             "position"    : pos,

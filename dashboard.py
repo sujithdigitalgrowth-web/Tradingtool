@@ -91,11 +91,12 @@ def api_start_trading():
     body       = request.json or {}
     max_trades = max(1, min(10, int(body.get("max_trades", 2))))
     lots       = max(1, min(20, int(body.get("lots", 1))))
+    paper      = bool(body.get("paper", False))
     try:
         t = get_trader()
-        t.start(max_trades=max_trades, lots=lots)
-        _save_trading_config({"max_trades": max_trades, "lots": lots})
-        return jsonify({"status": "started", "max_trades": max_trades, "lots": lots})
+        t.start(max_trades=max_trades, lots=lots, paper_mode=paper)
+        _save_trading_config({"max_trades": max_trades, "lots": lots, "paper": paper})
+        return jsonify({"status": "started", "max_trades": max_trades, "lots": lots, "paper": paper})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -234,6 +235,7 @@ TEMPLATE = r"""
   .badge-live{background:#dcfce7;color:#16a34a;border:1px solid #86efac}
   .badge-stop{background:#fee2e2;color:#dc2626;border:1px solid #fca5a5}
   .badge-mon {background:#fef9c3;color:#ca8a04;border:1px solid #fde047}
+  .badge-paper{background:#dbeafe;color:#1d4ed8;border:1px solid #93c5fd}
   #range-chart-wrap{position:relative;height:260px}
   input[type="date"]{color-scheme:light}
   .insight-bullet::before{content:"▸ ";color:#3b82f6}
@@ -466,9 +468,34 @@ TEMPLATE = r"""
           <span id="m-units" class="text-xs text-gray-400">= 65 units per trade</span>
         </div>
       </div>
+      <div>
+        <label class="text-sm font-semibold text-gray-700 block mb-2">Mode</label>
+        <div class="flex gap-3">
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input type="radio" name="m-mode" id="m-mode-paper" value="paper" checked
+              class="accent-blue-600"/>
+            <span class="text-sm text-gray-700">
+              <span class="font-semibold text-blue-700">Paper Trading</span>
+              <span class="text-xs text-gray-400 ml-1">— simulate only, no real orders</span>
+            </span>
+          </label>
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input type="radio" name="m-mode" id="m-mode-live" value="live"
+              class="accent-green-600"/>
+            <span class="text-sm text-gray-700">
+              <span class="font-semibold text-green-700">Live Trading</span>
+              <span class="text-xs text-gray-400 ml-1">— real Angel One orders</span>
+            </span>
+          </label>
+        </div>
+      </div>
     </div>
 
-    <div class="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 mb-5 text-xs text-amber-800">
+    <div id="m-warning-paper" class="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3 mb-5 text-xs text-blue-800">
+      📋 <strong>Paper mode:</strong> Signals fire and P&amp;L is tracked using real market prices,
+      but <strong>no orders are placed</strong> on Angel One. Safe to run anytime.
+    </div>
+    <div id="m-warning-live" class="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 mb-5 text-xs text-amber-800 hidden">
       ⚠ <strong>Live mode:</strong> Real orders will be placed on your Angel One account.
       The bot trades only when a signal fires — it does not guarantee
       <span id="m-max-display">2</span> trades per day.
@@ -547,7 +574,7 @@ function tradeTable(trades){
       <td class="px-3 py-2">${boughtCell}</td>
       <td class="px-3 py-2">${soldCell}</td>
       <td class="px-3 py-2 text-right font-bold ${cls(t.pnl)}">${sign(t.pnl)}${inr(t.pnl)}</td>
-      <td class="px-3 py-2 text-gray-400">${t.reason||''}</td>
+      <td class="px-3 py-2 text-gray-400">${t.reason||''}${t.paper?'<span class="ml-1 text-xs bg-blue-100 text-blue-600 px-1 rounded">P</span>':''}</td>
     </tr>`}).join('');
   return`<div class="overflow-x-auto"><table class="w-full">
     <thead><tr class="text-gray-400 border-b border-gray-100 text-xs">
@@ -578,13 +605,15 @@ function refreshLive(){
     const badge  = document.getElementById('status-badge');
     badge.textContent = status;
     badge.className   = 'text-xs font-bold px-3 py-1 rounded-full '+
-      (status==='LIVE'?'badge-live pulse':status==='MONITORING'?'badge-mon':'badge-stop');
+      (status==='LIVE'?'badge-live pulse':status==='PAPER'?'badge-paper pulse':status==='MONITORING'?'badge-mon':'badge-stop');
 
     // Buttons
-    const isLive = (status==='LIVE');
-    const isMon  = (status==='MONITORING');
-    document.getElementById('btn-start').style.display = (!isLive&&!isMon)?'':'none';
-    document.getElementById('btn-stop') .style.display = isLive?'':'none';
+    const isLive  = (status==='LIVE');
+    const isPaper = (status==='PAPER');
+    const isMon   = (status==='MONITORING');
+    const isActive = isLive || isPaper;
+    document.getElementById('btn-start').style.display = (!isActive&&!isMon)?'':'none';
+    document.getElementById('btn-stop') .style.display = isActive?'':'none';
     document.getElementById('btn-force').style.display = isMon ?'':'none';
 
     // Connection badge
@@ -595,7 +624,10 @@ function refreshLive(){
 
     // Session info
     let info = '';
-    if(isLive||isMon) info=`${s.config?.lots||1} lot(s) · max ${s.config?.max_trades||2} trades`;
+    if(isActive||isMon){
+      info=`${s.config?.lots||1} lot(s) · max ${s.config?.max_trades||2} trades`;
+      if(isPaper||s.paper_mode) info += ' · PAPER';
+    }
     document.getElementById('session-info').textContent = info;
 
     // Stats
@@ -686,7 +718,11 @@ function openStartModal(){
   fetch('/api/trading-config').then(r=>r.json()).then(cfg=>{
     document.getElementById('m-max-trades').value=cfg.max_trades||2;
     document.getElementById('m-lots').value=cfg.lots||1;
+    const isPaper = cfg.paper !== false; // default to paper
+    document.getElementById('m-mode-paper').checked = isPaper;
+    document.getElementById('m-mode-live') .checked = !isPaper;
     updateModalUnits();
+    updateModeWarning();
   }).catch(()=>{});
   document.getElementById('modal-bg').classList.add('open');
 }
@@ -699,19 +735,27 @@ function updateModalUnits(){
   document.getElementById('m-units')      .textContent='= '+(lots*65)+' units per trade';
   document.getElementById('m-max-display').textContent=mt;
 }
+function updateModeWarning(){
+  const isPaper=document.getElementById('m-mode-paper').checked;
+  document.getElementById('m-warning-paper').classList.toggle('hidden',!isPaper);
+  document.getElementById('m-warning-live') .classList.toggle('hidden', isPaper);
+}
 document.addEventListener('DOMContentLoaded',()=>{
   document.getElementById('m-lots')      .addEventListener('input',updateModalUnits);
   document.getElementById('m-max-trades').addEventListener('input',updateModalUnits);
+  document.getElementById('m-mode-paper').addEventListener('change',updateModeWarning);
+  document.getElementById('m-mode-live') .addEventListener('change',updateModeWarning);
 });
 
 function confirmStart(){
   const max_trades=parseInt(document.getElementById('m-max-trades').value);
   const lots      =parseInt(document.getElementById('m-lots').value);
+  const paper     =document.getElementById('m-mode-paper').checked;
   closeModal();
   fetch('/api/start-trading',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({max_trades,lots})
+    body:JSON.stringify({max_trades,lots,paper})
   }).then(r=>r.json()).then(d=>{
     if(d.error) alert('Error: '+d.error);
     else setTimeout(refreshLive,1000);
