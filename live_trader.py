@@ -5,8 +5,19 @@ Lot size  : 65 (NSE, effective Oct 28 2025)
 """
 import os, json, time, threading, requests
 import pandas as pd, numpy as np
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from logzero import logger
+
+# Always use IST — Railway (and most cloud hosts) run UTC
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+def _now() -> datetime:
+    """Current datetime in IST, timezone-naive (for string comparisons)."""
+    return datetime.now(_IST).replace(tzinfo=None)
+
+def _today() -> date:
+    """Today's date in IST."""
+    return datetime.now(_IST).date()
 
 # ── Telegram alerts ───────────────────────────────────────────────
 _TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -44,7 +55,7 @@ MARKET_CLOSE    = "15:30"
 
 def _load_scrip():
     """Download NFO scrip master from Angel One (cached daily)."""
-    today = str(date.today())
+    today = str(_today())
     if os.path.exists(SCRIP_CACHE):
         try:
             with open(SCRIP_CACHE) as f:
@@ -74,7 +85,7 @@ def _load_scrip():
 
 def _next_thursday():
     """Nearest upcoming Thursday (Nifty weekly expiry)."""
-    today = date.today()
+    today = _today()
     for i in range(8):
         d = today + timedelta(days=i)
         if d.weekday() == 3:
@@ -144,7 +155,7 @@ class AngelTrader:
         self.connected    = False
         self.balance      = 0.0
         self.nifty_ltp    = 0.0
-        self._today       = date.today()
+        self._today       = _today()
 
     # ── Session management ────────────────────────────────────────
 
@@ -154,7 +165,7 @@ class AngelTrader:
         self._obj       = obj
         self._auth      = auth
         self._api_key   = os.getenv("ANGEL_API_KEY", "")
-        self._last_login = datetime.now()
+        self._last_login = _now()
         self._scrip     = _load_scrip()
         self.connected  = True
         self.last_error = None
@@ -164,7 +175,7 @@ class AngelTrader:
         if self._obj is None:
             self.login()
             return
-        if self._last_login and (datetime.now() - self._last_login).total_seconds() > 6.5 * 3600:
+        if self._last_login and (_now() - self._last_login).total_seconds() > 6.5 * 3600:
             logger.info("AngelTrader: session refresh")
             self.login()
 
@@ -210,7 +221,7 @@ class AngelTrader:
 
     def _fetch_live_data(self):
         """Fetch last 12 days of 5m candles (enough for EMA20 + buffer)."""
-        today    = date.today()
+        today    = _today()
         lookback = today - timedelta(days=12)
 
         df_nbees = _fetch_intraday(self._auth, self._api_key,
@@ -246,8 +257,8 @@ class AngelTrader:
         Run V2 indicator logic on latest closed 5m candle.
         Returns ("BUY_CE" | "BUY_PE" | None, vix_value | None)
         """
-        today = date.today()
-        now   = datetime.now()
+        today = _today()
+        now   = _now()
 
         # VIX filter
         vix_val = None
@@ -377,7 +388,7 @@ class AngelTrader:
                 "qty"          : qty,
                 "entry_price"  : round(entry_ltp, 2),
                 "entry_spot"   : round(spot, 2),
-                "entry_time"   : datetime.now().strftime("%H:%M"),
+                "entry_time"   : _now().strftime("%H:%M"),
                 "partial_done" : False,
                 "trail_on"     : False,
                 "trail_high"   : entry_ltp,
@@ -395,7 +406,7 @@ class AngelTrader:
             f"Lots   : {lots} ({qty} qty)\n"
             f"LTP    : ₹{entry_ltp:.2f}\n"
             f"Spot   : ₹{spot:.2f}\n"
-            f"Time   : {datetime.now().strftime('%H:%M')}")
+            f"Time   : {_now().strftime('%H:%M')}")
         self._save_state()
         return True
 
@@ -419,7 +430,7 @@ class AngelTrader:
         with self._lock:
             self.trades.append({
                 "time"      : pos["entry_time"],
-                "exit_time" : datetime.now().strftime("%H:%M"),
+                "exit_time" : _now().strftime("%H:%M"),
                 "symbol"    : pos["symbol"],
                 "side"      : pos["side"],
                 "strike"    : pos["strike"],
@@ -445,7 +456,7 @@ class AngelTrader:
             f"Qty    : {pos['qty']}\n"
             f"P&L    : {'+'if pnl>=0 else ''}₹{pnl:,.2f}\n"
             f"Daily  : {'+'if self.daily_pnl>=0 else ''}₹{self.daily_pnl:,.2f}\n"
-            f"Time   : {datetime.now().strftime('%H:%M')}")
+            f"Time   : {_now().strftime('%H:%M')}")
         self._save_state()
 
     def _partial_exit(self, ltp):
@@ -460,7 +471,7 @@ class AngelTrader:
         with self._lock:
             self.trades.append({
                 "time"      : pos["entry_time"],
-                "exit_time" : datetime.now().strftime("%H:%M"),
+                "exit_time" : _now().strftime("%H:%M"),
                 "symbol"    : pos["symbol"],
                 "side"      : pos["side"],
                 "strike"    : pos["strike"],
@@ -481,7 +492,7 @@ class AngelTrader:
             f"Sold   : {qty} qty (1 lot)\n"
             f"LTP    : ₹{ltp:.2f}  P&L: +₹{pnl:,.2f}\n"
             f"Remaining: {pos['qty'] - qty} qty — running to TARGET\n"
-            f"Time   : {datetime.now().strftime('%H:%M')}")
+            f"Time   : {_now().strftime('%H:%M')}")
         self._save_state()
 
     # ── Position monitoring ───────────────────────────────────────
@@ -491,7 +502,7 @@ class AngelTrader:
         if not pos["active"]:
             return
 
-        ts = datetime.now().strftime("%H:%M")
+        ts = _now().strftime("%H:%M")
         if ts >= SQUAREOFF_TIME:
             self._exit("EOD_SQUAREOFF")
             return
@@ -557,10 +568,10 @@ class AngelTrader:
         while self._running:
             try:
                 # Reset daily state at day change
-                if date.today() != self._today:
+                if _today() != self._today:
                     self._reset_day()
 
-                now = datetime.now()
+                now = _now()
                 if not _market_open(now):
                     time.sleep(60)
                     continue
@@ -571,7 +582,7 @@ class AngelTrader:
                         and self.enabled
                         and not self.position["active"]
                         and self.trade_count < self.max_trades
-                        and not (bt.V2_SKIP_THURSDAY and date.today().weekday() == 3)):
+                        and not (bt.V2_SKIP_THURSDAY and _today().weekday() == 3)):
                     # Always update timing so dashboard shows loop is alive
                     next_t = _next_candle(now)
                     self.sig_info["time"]       = now.strftime("%H:%M:%S")
@@ -595,7 +606,7 @@ class AngelTrader:
                 self._save_state()
 
                 # Sleep until 35 seconds after next 5-minute candle close
-                sleep_secs = max(30, (_next_candle(now) - datetime.now()).total_seconds())
+                sleep_secs = max(30, (_next_candle(now) - _now()).total_seconds())
                 time.sleep(min(sleep_secs, 120))
 
             except Exception as e:
@@ -695,14 +706,14 @@ class AngelTrader:
             },
             "trades"      : list(self.trades),
             "last_error"  : self.last_error,
-            "timestamp"   : datetime.now().strftime("%H:%M:%S"),
+            "timestamp"   : _now().strftime("%H:%M:%S"),
         }
 
     # ── Helpers ───────────────────────────────────────────────────
 
     def _reset_day(self):
         with self._lock:
-            self._today      = date.today()
+            self._today      = _today()
             self.position    = _empty_pos()
             self.trades      = []
             self.daily_pnl   = 0.0
