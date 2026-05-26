@@ -167,13 +167,24 @@ class AngelTrader:
         from login import login as _do_login
         try:
             obj, auth, _, _ = _do_login()
+        except EnvironmentError as e:
+            # Missing env vars — very actionable, send specific message
+            self.connected  = False
+            self.last_error = str(e)
+            _tg(f"🔴 <b>Login Failed — Missing Env Vars</b>\n"
+                f"Error  : {e}\n"
+                f"Fix    : Go to Railway → your project → Variables\n"
+                f"         Add: ANGEL_API_KEY, ANGEL_CLIENT_ID,\n"
+                f"              ANGEL_PASSWORD, ANGEL_TOTP_SECRET")
+            raise
         except Exception as e:
             self.connected  = False
             self.last_error = str(e)
-            _tg(f"🔴 <b>Angel One Login FAILED</b>\n"
-                f"Error : {e}\n"
-                f"Time  : {_now().strftime('%H:%M:%S')}\n"
-                f"Action: Bot cannot trade until this is resolved.")
+            _tg(f"🔴 <b>Angel One Login Failed</b>\n"
+                f"Error  : {e}\n"
+                f"Time   : {_now().strftime('%H:%M:%S')}\n"
+                f"Causes : Wrong credentials | Railway IP blocked |\n"
+                f"         Angel One API down | Clock drift on Railway")
             raise
         self._obj       = obj
         self._auth      = auth
