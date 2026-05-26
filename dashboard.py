@@ -1,6 +1,20 @@
-import json, os, threading
+import json, os, threading, requests as _requests
 from flask import Flask, render_template_string, jsonify, request
 from datetime import datetime, date, timedelta
+
+def _tg(msg: str):
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    chat  = os.getenv("TELEGRAM_CHAT_ID",   "")
+    if not token or not chat:
+        return
+    try:
+        _requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat, "text": msg, "parse_mode": "HTML"},
+            timeout=5,
+        )
+    except Exception:
+        pass
 
 app = Flask(__name__)
 
@@ -39,8 +53,22 @@ def _init_trader():
             t.start(max_trades=max_trades, lots=lots, paper_mode=paper)
             from logzero import logger
             logger.info(f"Auto-resumed trading: {lots} lot(s), max {max_trades} trades, paper={paper}")
-    except Exception:
-        pass   # Dashboard still works without Angel One connection
+            mode = "📋 PAPER" if paper else "🟢 LIVE"
+            _tg(f"🔄 <b>Server Restarted — Trading Auto-Resumed</b>\n"
+                f"Mode   : {mode}\n"
+                f"Lots   : {lots}  |  Max trades: {max_trades}\n"
+                f"Time   : {datetime.now().strftime('%d %b %Y %H:%M:%S')}\n"
+                f"Status : Connected to Angel One ✅")
+        else:
+            _tg(f"🔄 <b>Server Restarted</b>\n"
+                f"Time   : {datetime.now().strftime('%d %b %Y %H:%M:%S')}\n"
+                f"Status : Connected ✅ — Trading is STOPPED\n"
+                f"Action : Open dashboard and click ▶ Start Trading")
+    except Exception as e:
+        _tg(f"🔴 <b>Server Restart FAILED</b>\n"
+            f"Error  : {e}\n"
+            f"Time   : {datetime.now().strftime('%d %b %Y %H:%M:%S')}\n"
+            f"Action : Check Angel One credentials / network on Railway")
 
 
 # ── Generic helpers ───────────────────────────────────────────────

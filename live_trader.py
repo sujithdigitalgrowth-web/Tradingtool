@@ -158,12 +158,23 @@ class AngelTrader:
         self.balance      = 0.0
         self.nifty_ltp    = 0.0
         self._today       = _today()
+        self._consec_errors   = 0      # consecutive signal-check failures
+        self._last_error_tg   = None   # datetime of last error Telegram sent
 
     # ── Session management ────────────────────────────────────────
 
     def login(self):
         from login import login as _do_login
-        obj, auth, _, _ = _do_login()
+        try:
+            obj, auth, _, _ = _do_login()
+        except Exception as e:
+            self.connected  = False
+            self.last_error = str(e)
+            _tg(f"🔴 <b>Angel One Login FAILED</b>\n"
+                f"Error : {e}\n"
+                f"Time  : {_now().strftime('%H:%M:%S')}\n"
+                f"Action: Bot cannot trade until this is resolved.")
+            raise
         self._obj       = obj
         self._auth      = auth
         self._api_key   = os.getenv("ANGEL_API_KEY", "")
@@ -400,6 +411,11 @@ class AngelTrader:
             resp = self._order(symbol, token, qty, "BUY")
             if not (resp and resp.get("status")):
                 self.last_error = f"Buy order failed: {resp}"
+                _tg(f"🔴 <b>BUY ORDER FAILED</b>\n"
+                    f"Symbol : {symbol}\n"
+                    f"Qty    : {qty}\n"
+                    f"Error  : {resp}\n"
+                    f"Time   : {_now().strftime('%H:%M:%S')}")
                 return False
             order_id = resp.get("data", {}).get("orderid", "—")
 
@@ -453,6 +469,13 @@ class AngelTrader:
             if not (resp and resp.get("status")):
                 self.last_error = f"Sell order failed for {pos['symbol']}: {resp}"
                 logger.error(self.last_error)
+                _tg(f"🔴 <b>SELL ORDER FAILED — MANUAL ACTION NEEDED</b>\n"
+                    f"Symbol : {pos['symbol']}\n"
+                    f"Qty    : {pos['qty']}\n"
+                    f"Reason : {reason}\n"
+                    f"Error  : {resp}\n"
+                    f"Time   : {_now().strftime('%H:%M:%S')}\n"
+                    f"⚠️ Please exit manually on Angel One app!")
                 return
 
         pnl = round((ltp - pos["entry_price"]) * pos["qty"], 2)
@@ -637,6 +660,19 @@ class AngelTrader:
                     except Exception as e:
                         logger.error(f"Signal check error: {e}", exc_info=True)
                         self.last_error = str(e)
+                        self._consec_errors += 1
+                        # Alert after 3 consecutive failures, then at most once per 10 min
+                        now_dt = _now()
+                        quiet  = (self._last_error_tg is not None and
+                                  (now_dt - self._last_error_tg).total_seconds() < 600)
+                        if self._consec_errors >= 3 and not quiet:
+                            _tg(f"⚠️ <b>Signal Check Error (×{self._consec_errors})</b>\n"
+                                f"Error : {e}\n"
+                                f"Time  : {now_dt.strftime('%H:%M:%S')}\n"
+                                f"Action: Bot is retrying — check Angel One API / network.")
+                            self._last_error_tg = now_dt
+                    else:
+                        self._consec_errors = 0   # reset on success
 
                 self._save_state()
 
