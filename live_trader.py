@@ -151,7 +151,8 @@ class AngelTrader:
 
         # Signal info for display
         self.sig_info     = {"signal": None, "vix": None,
-                             "time": None, "next_check": None}
+                             "time": None, "next_check": None,
+                             "filter_reason": None}
         self.last_error   = None
         self.connected    = False
         self.balance      = 0.0
@@ -257,6 +258,7 @@ class AngelTrader:
         """
         Run V2 indicator logic on latest closed 5m candle.
         Returns ("BUY_CE" | "BUY_PE" | None, vix_value | None)
+        Also updates self.sig_info["filter_reason"] with why no signal fired.
         """
         today = _today()
         now   = _now()
@@ -268,11 +270,13 @@ class AngelTrader:
             if not vix_rows.empty:
                 vix_val = round(float(vix_rows.iloc[-1]["Close"]), 2)
                 if not (bt.V2_VIX_MIN <= vix_val <= bt.V2_VIX_MAX):
+                    self.sig_info["filter_reason"] = f"VIX {vix_val} outside {bt.V2_VIX_MIN}–{bt.V2_VIX_MAX}"
                     return None, vix_val
 
         # Today's candles (NIFTYBEES for indicators)
         sday = df_nbees[df_nbees.index.date == today].between_time("09:15", "15:30")
         if len(sday) < bt.V2_EMA_SLOW + 2:
+            self.sig_info["filter_reason"] = f"Not enough candles ({len(sday)}, need {bt.V2_EMA_SLOW + 2})"
             return None, vix_val
 
         # Time window check
@@ -280,11 +284,13 @@ class AngelTrader:
         in_morning   = bt.V2_NO_ENTRY_BEFORE <= ts <= bt.V2_MORNING_END
         in_afternoon = bt.V2_AFTERNOON_START  <= ts <  bt.NO_ENTRY_AFTER
         if not (in_morning or in_afternoon):
+            self.sig_info["filter_reason"] = f"Outside trading window ({bt.V2_NO_ENTRY_BEFORE}–{bt.V2_MORNING_END} / {bt.V2_AFTERNOON_START}–{bt.NO_ENTRY_AFTER})"
             return None, vix_val
 
-        # Prev close for prev_close (not actually used in signal, kept for parity)
+        # Prev close
         prev_rows = df_1d[df_1d.index.date < today]
         if prev_rows.empty:
+            self.sig_info["filter_reason"] = "No prev-day data"
             return None, vix_val
 
         # Compute indicators on NIFTYBEES ETF prices
@@ -322,11 +328,27 @@ class AngelTrader:
         raw_sell = (cl < vw and cl < ef and cl < es and cl < op
                     and vol_surge and rsi < bt.V2_RSI_MAX_PE and bnf_bear and st == -1)
 
+        # Build human-readable reason for dashboard when no signal fires
+        if not raw_buy and not raw_sell:
+            reasons = []
+            if not (cl > vw):      reasons.append(f"Close({cl:.2f})<VWAP({vw:.2f})")
+            if not (cl > ef):      reasons.append(f"Close<EMA9({ef:.2f})")
+            if not (cl > es):      reasons.append(f"Close<EMA20({es:.2f})")
+            if not vol_surge:      reasons.append(f"Vol {vol/vm:.1f}x<1.5x" if vm > 0 else "Vol N/A")
+            if rsi <= bt.V2_RSI_MIN_CE and rsi >= bt.V2_RSI_MAX_PE:
+                reasons.append(f"RSI({rsi:.0f}) neutral")
+            if st != 1 and st != -1:  reasons.append("ST neutral")
+            self.sig_info["filter_reason"] = ", ".join(reasons) if reasons else "Conditions not met"
+
         signal = None
         if raw_buy  and self.last_signal != "buy":
             signal = "BUY_CE"
+            self.sig_info["filter_reason"] = None
         elif raw_sell and self.last_signal != "sell":
             signal = "BUY_PE"
+            self.sig_info["filter_reason"] = None
+        elif raw_buy or raw_sell:
+            self.sig_info["filter_reason"] = "Dedup — same direction already traded"
 
         return signal, vix_val
 

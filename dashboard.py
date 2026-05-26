@@ -28,8 +28,18 @@ def get_trader():
 
 def _init_trader():
     try:
-        get_trader().login()
-    except Exception as e:
+        t = get_trader()
+        t.login()
+        # Auto-resume trading if it was active before the server restarted
+        cfg = load_json(TRADING_CONFIG_FILE)
+        if cfg.get("active"):
+            max_trades = int(cfg.get("max_trades", 2))
+            lots       = int(cfg.get("lots", 1))
+            paper      = bool(cfg.get("paper", False))
+            t.start(max_trades=max_trades, lots=lots, paper_mode=paper)
+            from logzero import logger
+            logger.info(f"Auto-resumed trading: {lots} lot(s), max {max_trades} trades, paper={paper}")
+    except Exception:
         pass   # Dashboard still works without Angel One connection
 
 
@@ -46,10 +56,15 @@ def load_json(path):
 
 def _get_trading_config():
     cfg = load_json(TRADING_CONFIG_FILE)
-    return {"max_trades": int(cfg.get("max_trades", 2)),
-            "lots":       int(cfg.get("lots", 1))}
+    return {
+        "max_trades": int(cfg.get("max_trades", 2)),
+        "lots":       int(cfg.get("lots", 1)),
+        "paper":      bool(cfg.get("paper", True)),
+        "active":     bool(cfg.get("active", False)),
+    }
 
 def _save_trading_config(cfg):
+    os.makedirs("logs", exist_ok=True)
     with open(TRADING_CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=2)
 
@@ -95,7 +110,8 @@ def api_start_trading():
     try:
         t = get_trader()
         t.start(max_trades=max_trades, lots=lots, paper_mode=paper)
-        _save_trading_config({"max_trades": max_trades, "lots": lots, "paper": paper})
+        _save_trading_config({"max_trades": max_trades, "lots": lots,
+                              "paper": paper, "active": True})
         return jsonify({"status": "started", "max_trades": max_trades, "lots": lots, "paper": paper})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -104,6 +120,9 @@ def api_start_trading():
 def api_stop_trading():
     try:
         get_trader().stop()
+        cfg = _get_trading_config()
+        cfg["active"] = False
+        _save_trading_config(cfg)
         return jsonify({"status": "stopped"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -112,6 +131,9 @@ def api_stop_trading():
 def api_force_exit():
     try:
         get_trader().force_exit()
+        cfg = _get_trading_config()
+        cfg["active"] = False
+        _save_trading_config(cfg)
         return jsonify({"status": "exited"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -127,7 +149,9 @@ def api_set_config():
     body       = request.json or {}
     max_trades = max(1, min(10, int(body.get("max_trades", 2))))
     lots       = max(1, min(20, int(body.get("lots", 1))))
-    cfg = {"max_trades": max_trades, "lots": lots}
+    existing   = _get_trading_config()
+    cfg = {"max_trades": max_trades, "lots": lots,
+           "paper": existing.get("paper", True), "active": existing.get("active", False)}
     _save_trading_config(cfg)
     return jsonify(cfg)
 
@@ -348,7 +372,8 @@ TEMPLATE = r"""
         <p id="sig-next" class="font-bold text-gray-600">—</p>
       </div>
     </div>
-    <div id="sig-error" class="hidden mt-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded px-3 py-2"></div>
+    <div id="sig-filter" class="hidden mt-3 bg-amber-50 border border-amber-200 text-amber-800 text-xs rounded px-3 py-2"></div>
+    <div id="sig-error"  class="hidden mt-3 bg-red-50  border border-red-200  text-red-700  text-xs rounded px-3 py-2"></div>
   </div>
 
   <!-- ── Active Position ── -->
@@ -689,6 +714,16 @@ function refreshLive(){
     document.getElementById('live-trades-tbl').innerHTML = tradeTable(trades);
     document.getElementById('live-trade-badge').textContent =
       trades.length ? trades.length+' trade'+(trades.length>1?'s':'') : '';
+
+    // Filter reason in signal monitor
+    const filterBox = document.getElementById('sig-filter');
+    const filterReason = sig.filter_reason;
+    if(filterReason && !pos.active){
+      filterBox.textContent = '⚙ Filter: ' + filterReason;
+      filterBox.classList.remove('hidden');
+    } else {
+      filterBox.classList.add('hidden');
+    }
 
     // Error in signal monitor (persistent until cleared)
     const errBox = document.getElementById('sig-error');
