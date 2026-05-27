@@ -101,12 +101,22 @@ def _expiry_tag(d: date) -> str:
 def _find_option(scrip, strike: int, opt_type: str, expiry: date):
     """Return (token, symbol) for the given Nifty option."""
     # Try zero-padded (22MAY25) and non-padded (1JUN25) forms
+    tried = []
     for exp in (_expiry_tag(expiry), str(expiry.day) + expiry.strftime("%b%y").upper()):
         target = f"NIFTY{exp}{strike}{opt_type}"
+        tried.append(target)
         for x in scrip:
             if x.get("symbol") == target:
                 return x["token"], x["symbol"]
-    logger.warning(f"Option not found: {strike}{opt_type} exp {expiry}")
+
+    # Log nearby symbols to diagnose format mismatch
+    nearby = [x.get("symbol","") for x in scrip
+              if str(strike) in x.get("symbol","") and opt_type in x.get("symbol","")][:5]
+    logger.warning(
+        f"Option not found. Tried: {tried}. "
+        f"Nearby symbols with {strike}{opt_type}: {nearby}. "
+        f"Scrip size: {len(scrip)}"
+    )
     return None, None
 
 

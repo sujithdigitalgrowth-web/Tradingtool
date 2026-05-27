@@ -192,6 +192,37 @@ def api_test_trade():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ── API: Scrip debug ─────────────────────────────────────────────
+
+@app.route("/api/debug-scrip")
+def api_debug_scrip():
+    """Dump scrip cache entries near a strike to diagnose symbol format issues."""
+    try:
+        t = get_trader()
+        scrip = t._scrip
+        if not scrip:
+            return jsonify({"error": "Scrip cache empty — start trading first", "total": 0})
+
+        strike = request.args.get("strike", "")
+        # Show sample of any NIFTY entries, or filter by strike
+        if strike:
+            matches = [x for x in scrip if strike in x.get("symbol", "")]
+        else:
+            matches = [x for x in scrip if "NIFTY" in x.get("symbol", "")][:20]
+
+        from live_trader import _next_thursday, _expiry_tag
+        expiry = _next_thursday()
+        tag    = _expiry_tag(expiry)
+
+        return jsonify({
+            "total_nifty_options": len(scrip),
+            "expiry_date": str(expiry),
+            "expiry_tag_tried": tag,
+            "sample_symbols": [x.get("symbol") for x in matches[:30]],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 # ── API: Trading config ───────────────────────────────────────────
 
 @app.route("/api/trading-config", methods=["GET"])
