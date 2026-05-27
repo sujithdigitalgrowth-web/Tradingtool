@@ -19,9 +19,10 @@ import time as _time
 from datetime import datetime, date, timedelta
 from logzero import logger
 
-NIFTYBEES_TOKEN  = "10576"
-BANKBEES_TOKEN   = "11439"
-NIFTY_MULTIPLIER = 88.31   # NIFTYBEES close × this ≈ Nifty 50 spot price
+NIFTYBEES_TOKEN   = "10576"
+BANKBEES_TOKEN    = "11439"
+NIFTY_MULTIPLIER  = 88.31   # NIFTYBEES close × this ≈ Nifty 50 spot price
+BANKBEES_MULTIPLIER = 100.0  # BANKBEES close × this ≈ BankNifty spot price (recalibrate if ETF drifts)
 
 CHUNK_DAYS = 60            # safe chunk size for 5m API requests
 API_URL    = "https://apiconnect.angelbroking.com/rest/secure/angelbroking/historical/v1/getCandleData"
@@ -82,9 +83,12 @@ def _to_df(raw: list, multiplier: float = 1.0) -> pd.DataFrame:
     Convert raw candle list to DataFrame.
     If multiplier != 1.0, scales OHLC by it (to convert ETF → index proxy).
     Volume is kept as-is.
+    Always returns a DataFrame with a DatetimeIndex (never a plain RangeIndex).
     """
     if not raw:
-        return pd.DataFrame()
+        empty = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+        empty.index = pd.DatetimeIndex([], name="timestamp", tz="Asia/Kolkata")
+        return empty
     df = pd.DataFrame(raw, columns=["timestamp", "Open", "High", "Low", "Close", "Volume"])
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     if df["timestamp"].dt.tz is None:
