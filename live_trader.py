@@ -84,13 +84,13 @@ def _load_scrip():
 
 
 def _next_thursday():
-    """Nearest upcoming Thursday (Nifty weekly expiry)."""
+    """Nearest upcoming Tuesday — Nifty weekly expiry moved to Tuesday (NSE 2025)."""
     today = _today()
     for i in range(8):
         d = today + timedelta(days=i)
-        if d.weekday() == 3:
+        if d.weekday() == 1:   # 1 = Tuesday
             return d
-    return today + timedelta(days=3)
+    return today + timedelta(days=2)
 
 
 def _expiry_tag(d: date) -> str:
