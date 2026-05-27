@@ -19,8 +19,7 @@ def _tg(msg: str):
 app = Flask(__name__)
 
 STATE_FILE          = "logs/state.json"
-RANGE_CACHE_FILE     = "logs/range_cache.json"
-RANGE_CACHE_BNF_FILE = "logs/range_cache_bnf.json"
+RANGE_CACHE_FILE    = "logs/range_cache.json"
 TRADING_FLAG_FILE   = "logs/trading_enabled.json"
 TRADING_CONFIG_FILE = "logs/trading_config.json"
 LIVE_STATE_FILE     = "logs/live_state.json"
@@ -194,10 +193,11 @@ def api_state():
 def api_run_today():
     try:
         import backtest
-        from backtest import INITIAL_BALANCE
-        cfg   = _get_trading_config()
-        instr = (request.json or {}).get("instrument", "NIFTY").upper()
+        from backtest import fetch_range_data_v2, simulate_day, INITIAL_BALANCE
+        cfg = _get_trading_config()
         backtest.V2_MAX_TRADES = cfg["max_trades"]
+        backtest.QTY           = cfg["lots"] * backtest.LOT_SIZE
+        QTY = backtest.QTY
         today = date.today()
         result, target = None, None
         for delta in range(6):
@@ -206,20 +206,9 @@ def api_run_today():
                 continue
             try:
                 start = candidate - timedelta(days=40)
-                if instr == "BANKNIFTY":
-                    from backtest import fetch_range_data_bnf, simulate_day_bnf, BNF_LOT_SIZE
-                    qty = cfg["lots"] * BNF_LOT_SIZE
-                    df_5m, df_1d, df_sig, df_conf, df_vix = fetch_range_data_bnf(start, candidate)
-                    r = simulate_day_bnf(candidate, df_5m, df_1d,
-                                        df_signal=df_sig, df_confirm=df_conf,
-                                        df_vix=df_vix, qty=qty)
-                else:
-                    from backtest import fetch_range_data_v2, simulate_day
-                    backtest.QTY = cfg["lots"] * backtest.LOT_SIZE
-                    qty = backtest.QTY
-                    df_5m, df_1d, df_nbees, df_bnf, df_vix = fetch_range_data_v2(start, candidate)
-                    r = simulate_day(candidate, df_5m, df_1d,
-                                     df_nbees=df_nbees, df_bnf=df_bnf, df_vix=df_vix)
+                df_5m, df_1d, df_nbees, df_bnf, df_vix = fetch_range_data_v2(start, candidate)
+                r = simulate_day(candidate, df_5m, df_1d,
+                                 df_nbees=df_nbees, df_bnf=df_bnf, df_vix=df_vix)
                 if r:
                     result, target = r, candidate
                     break
@@ -237,7 +226,7 @@ def api_run_today():
             "risk"           : {"daily_pnl"  : result["daily_pnl"],
                                 "trade_count": result["trade_count"],
                                 "trades"     : result["trades"]},
-            "position"       : {"active": False, "qty": qty},
+            "position"       : {"active": False, "qty": QTY},
         }
         with open(STATE_FILE, "w") as f:
             json.dump(state, f, indent=2, default=str)
@@ -247,42 +236,29 @@ def api_run_today():
 
 @app.route("/api/range-cache")
 def api_range_cache():
-    instr = request.args.get("instrument", "NIFTY").upper()
-    cache_file = RANGE_CACHE_BNF_FILE if instr == "BANKNIFTY" else RANGE_CACHE_FILE
-    return jsonify(load_json(cache_file))
+    return jsonify(load_json(RANGE_CACHE_FILE))
 
 @app.route("/api/run-range", methods=["POST"])
 def api_run_range():
     try:
-        body   = request.json
-        start  = date.fromisoformat(body["start"])
-        end    = date.fromisoformat(body["end"])
-        instr  = body.get("instrument", "NIFTY").upper()
+        body  = request.json
+        start = date.fromisoformat(body["start"])
+        end   = date.fromisoformat(body["end"])
         if (end - start).days > 90:
             return jsonify({"error": "Range too large — max 90 days"}), 400
         import backtest
+        from backtest import run_range
         cfg = _get_trading_config()
         backtest.V2_MAX_TRADES = cfg["max_trades"]
-        if instr == "BANKNIFTY":
-            from backtest import run_range_bnf, BNF_LOT_SIZE
-            qty     = cfg["lots"] * BNF_LOT_SIZE
-            results = run_range_bnf(start, end, qty=qty)
-            label   = "V2 — Bank Nifty Live Strategy Parameters"
-            cache_path = RANGE_CACHE_BNF_FILE
-        else:
-            from backtest import run_range
-            backtest.QTY = cfg["lots"] * backtest.LOT_SIZE
-            results      = run_range(start, end)
-            label        = "V2 v2.3 — Live Strategy Parameters"
-            cache_path   = RANGE_CACHE_FILE
+        backtest.QTY           = cfg["lots"] * backtest.LOT_SIZE
+        results = run_range(start, end)
         cache = {
             "start": str(start), "end": str(end),
-            "instrument": instr,
-            "label": label,
+            "label": "V2 v2.3 — Live Strategy Parameters",
             "generated": datetime.now().strftime("%d %b %Y %H:%M"),
             "results": results,
         }
-        with open(cache_path, "w") as f:
+        with open(RANGE_CACHE_FILE, "w") as f:
             json.dump(cache, f, indent=2, default=str)
         return jsonify(cache)
     except Exception as e:
@@ -334,11 +310,6 @@ TEMPLATE = r"""
       <div class="text-right hidden md:block">
         <p class="text-xs text-gray-400">Nifty 50</p>
         <p id="hdr-nifty" class="text-base font-bold text-gray-900">—</p>
-      </div>
-      <!-- BankNifty LTP -->
-      <div class="text-right hidden md:block">
-        <p class="text-xs text-gray-400">Bank Nifty</p>
-        <p id="hdr-bnf" class="text-base font-bold text-gray-900">—</p>
       </div>
       <!-- Balance -->
       <div class="text-right hidden md:block">
@@ -417,9 +388,8 @@ TEMPLATE = r"""
         <p id="sig-vix" class="font-bold text-gray-800">—</p>
       </div>
       <div>
-        <p class="text-xs text-gray-400 mb-1">Signal</p>
+        <p class="text-xs text-gray-400 mb-1">Last Signal</p>
         <p id="sig-last" class="font-bold text-gray-400">No signal</p>
-        <p id="sig-instr" class="text-xs text-gray-400 mt-0.5"></p>
       </div>
       <div>
         <p class="text-xs text-gray-400 mb-1">Checked At</p>
@@ -432,15 +402,6 @@ TEMPLATE = r"""
     </div>
     <div id="sig-filter" class="hidden mt-3 bg-amber-50 border border-amber-200 text-amber-800 text-xs rounded px-3 py-2"></div>
     <div id="sig-error"  class="hidden mt-3 bg-red-50  border border-red-200  text-red-700  text-xs rounded px-3 py-2"></div>
-  </div>
-
-  <!-- ── Instrument Audit ── -->
-  <div id="audit-card" class="card p-4 hidden">
-    <div class="flex items-center justify-between mb-3">
-      <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold">Instrument Audit — What the bot evaluated</p>
-      <span id="audit-time" class="text-xs text-gray-400"></span>
-    </div>
-    <div id="audit-grid" class="grid grid-cols-1 md:grid-cols-2 gap-3"></div>
   </div>
 
   <!-- ── Active Position ── -->
@@ -478,21 +439,6 @@ TEMPLATE = r"""
   <div class="card p-4">
     <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold mb-3">Run Backtest</p>
     <div class="flex flex-wrap items-end gap-4">
-      <div>
-        <label class="text-xs text-gray-400 block mb-1">Instrument</label>
-        <div class="flex items-center gap-3 py-2">
-          <label class="flex items-center gap-1.5 cursor-pointer text-sm font-semibold text-gray-800">
-            <input type="radio" name="bt-instrument" value="NIFTY" checked
-              onchange="onInstrumentChange()" class="accent-gray-900"/>
-            Nifty 50
-          </label>
-          <label class="flex items-center gap-1.5 cursor-pointer text-sm font-semibold text-orange-700">
-            <input type="radio" name="bt-instrument" value="BANKNIFTY"
-              onchange="onInstrumentChange()" class="accent-orange-600"/>
-            Bank Nifty
-          </label>
-        </div>
-      </div>
       <div>
         <label class="text-xs text-gray-400 block mb-1">Start Date</label>
         <input id="range-start" type="date" value="2026-05-01"
@@ -648,12 +594,11 @@ const sign=n=>n>=0?'+':'-';
 const cls=n=>n>=0?'text-green-600':'text-red-500';
 
 // ── Trade table builder ────────────────────────────────────────
-const LOT_SIZES = {"NIFTY": 75, "BANKNIFTY": 15};
 function tradeTable(trades){
   if(!trades||!trades.length)
     return '<div class="px-4 py-8 text-center text-gray-400 text-sm">No trades yet.</div>';
+  const LOT=65;
   const rows=[...trades].reverse().map(t=>{
-    const LOT = LOT_SIZES[t.instrument] || LOT_SIZES["NIFTY"];
     const boughtUnits = t.qty_bought || t.qty || 0;
     const soldUnits   = t.qty || 0;
     const boughtLots  = Math.round(boughtUnits / LOT);
@@ -668,15 +613,10 @@ function tradeTable(trades){
       `<span class="font-bold ${isPartial?'text-amber-600':'text-red-600'}">${soldLots} lot${soldLots!==1?'s':''}</span>`+
       `<span class="text-gray-400 text-xs ml-1">(${soldUnits} qty)</span>`;
 
-    const instrLabel = t.instrument === 'BANKNIFTY' ? 'BNF' : (t.instrument === 'NIFTY' ? 'NF' : (t.instrument||''));
-    const instrBadge = instrLabel
-      ? `<span class="px-1.5 py-0.5 rounded text-xs font-bold ${t.instrument==='BANKNIFTY'?'bg-orange-100 text-orange-700':'bg-indigo-100 text-indigo-700'}">${instrLabel}</span>`
-      : '';
     return`
     <tr class="border-b border-gray-100 hover:bg-gray-50 text-xs">
       <td class="px-3 py-2 text-gray-500">${t.time||''}</td>
       <td class="px-3 py-2 text-gray-500">${t.exit_time||''}</td>
-      <td class="px-3 py-2">${instrBadge}</td>
       <td class="px-3 py-2 font-semibold text-gray-800">${t.symbol||'—'}</td>
       <td class="px-3 py-2">
         <span class="px-2 py-0.5 rounded ${t.side==='CE'?'bg-blue-100 text-blue-700':'bg-amber-100 text-amber-700'}">${t.side||''}</span>
@@ -693,7 +633,6 @@ function tradeTable(trades){
     <thead><tr class="text-gray-400 border-b border-gray-100 text-xs">
       <th class="text-left  px-3 py-2">Entry</th>
       <th class="text-left  px-3 py-2">Exit</th>
-      <th class="text-left  px-3 py-2">Index</th>
       <th class="text-left  px-3 py-2">Symbol</th>
       <th class="text-left  px-3 py-2">Type</th>
       <th class="text-right px-3 py-2">Spot</th>
@@ -756,80 +695,23 @@ function refreshLive(){
     const cash = stats.balance||0;
     document.getElementById('live-cash').textContent = cash ? inr(cash) : '—';
 
-    // Header Nifty + BankNifty + Cash
-    const spotLtps = mkt.spot_ltps || {};
-    const niftyLtp = spotLtps['NIFTY'] || mkt.nifty_ltp;
-    const bnfLtp   = spotLtps['BANKNIFTY'];
-    if(niftyLtp) document.getElementById('hdr-nifty').textContent='₹'+niftyLtp.toFixed(0);
-    if(bnfLtp)   document.getElementById('hdr-bnf')  .textContent='₹'+bnfLtp.toFixed(0);
-    if(cash)     document.getElementById('hdr-cash') .textContent=inr(cash);
+    // Header Nifty + Cash
+    if(mkt.nifty_ltp) document.getElementById('hdr-nifty').textContent='₹'+mkt.nifty_ltp.toFixed(0);
+    if(cash)          document.getElementById('hdr-cash') .textContent=inr(cash);
 
     // Signal monitor
     document.getElementById('sig-vix') .textContent = mkt.vix ? mkt.vix+'' : '—';
-    const sigEl    = document.getElementById('sig-last');
-    const sigInstr = document.getElementById('sig-instr');
-    const sigVal   = sig.signal;
+    const sigEl = document.getElementById('sig-last');
+    const sigVal = sig.signal;
     if(sigVal){
       sigEl.textContent  = sigVal;
       sigEl.className    = 'font-bold '+(sigVal.includes('CE')?'text-blue-600':'text-amber-600');
-      const iName = sig.instrument
-        ? (sig.instrument==='BANKNIFTY'?'Bank Nifty':'Nifty 50')
-        : '';
-      sigInstr.textContent = iName ? '→ '+iName : '';
     } else {
       sigEl.textContent  = 'No signal';
       sigEl.className    = 'font-bold text-gray-400';
-      sigInstr.textContent = '';
     }
     document.getElementById('sig-time').textContent = sig.time   || '—';
     document.getElementById('sig-next').textContent = sig.next_check || '—';
-
-    // Instrument audit card
-    const auditCard = document.getElementById('audit-card');
-    const auditGrid = document.getElementById('audit-grid');
-    const audit = sig.audit || [];
-    if(audit.length){
-      auditCard.classList.remove('hidden');
-      document.getElementById('audit-time').textContent = sig.time ? 'checked '+sig.time : '';
-      auditGrid.innerHTML = audit.map(a=>{
-        const ltp = spotLtps[a.instrument];
-        const ltpStr = ltp ? '₹'+ltp.toLocaleString('en-IN',{maximumFractionDigits:0}) : '';
-        const isSelected = a.instrument === sig.instrument && !!sig.signal;
-        const hasSignal  = !!a.signal;
-
-        let statusHtml;
-        if(hasSignal){
-          const dir = a.signal.includes('CE') ? 'text-blue-700' : 'text-amber-700';
-          statusHtml = `<span class="font-bold ${dir}">✅ ${a.signal}</span>`+
-            (a.score ? `<span class="text-xs text-gray-400 ml-2">score ${a.score}</span>` : '');
-        } else {
-          statusHtml = `<span class="text-red-500">❌</span> <span class="text-gray-500 text-xs">${a.reason||'No signal'}</span>`;
-        }
-
-        const outerCls = isSelected
-          ? 'border-2 border-green-400 bg-green-50 rounded-lg p-3'
-          : hasSignal
-            ? 'border border-blue-200 bg-blue-50 rounded-lg p-3'
-            : 'border border-gray-200 bg-gray-50 rounded-lg p-3';
-
-        const selectedBadge = isSelected
-          ? '<span class="text-xs font-bold text-green-700 bg-green-200 px-2 py-0.5 rounded ml-2">★ TRADING</span>'
-          : '';
-
-        return `<div class="${outerCls}">
-          <div class="flex justify-between items-center mb-2">
-            <div class="flex items-center gap-1">
-              <span class="font-bold text-sm text-gray-800">${a.display||a.instrument}</span>
-              ${selectedBadge}
-            </div>
-            <span class="text-xs font-mono text-gray-500">${ltpStr}</span>
-          </div>
-          <div class="text-sm">${statusHtml}</div>
-        </div>`;
-      }).join('');
-    } else {
-      auditCard.classList.add('hidden');
-    }
 
     // Active position
     const posCard = document.getElementById('pos-card');
@@ -963,20 +845,8 @@ document.getElementById('modal-bg').addEventListener('click',function(e){
 // ── Backtest tab ───────────────────────────────────────────────
 let rangeChart=null, rangeResults=[];
 
-function _selectedInstrument(){
-  const r=document.querySelector('input[name="bt-instrument"]:checked');
-  return r?r.value:'NIFTY';
-}
-
-function onInstrumentChange(){
-  document.getElementById('range-summary').classList.add('hidden');
-  document.getElementById('range-status').textContent='';
-  loadRangeCache();
-}
-
 function loadRangeCache(){
-  const instr=_selectedInstrument();
-  fetch('/api/range-cache?instrument='+instr).then(r=>r.json()).then(cache=>{
+  fetch('/api/range-cache').then(r=>r.json()).then(cache=>{
     if(cache.results&&cache.results.length){
       document.getElementById('range-status').textContent='Last run: '+(cache.generated||'');
       renderRange(cache.results,cache.label||'');
@@ -987,14 +857,13 @@ function loadRangeCache(){
 function runRange(){
   const start=document.getElementById('range-start').value;
   const end  =document.getElementById('range-end').value;
-  const instrument=_selectedInstrument();
   if(!start||!end) return;
   const btn=document.querySelector('button[onclick="runRange()"]');
   btn.disabled=true; btn.textContent='Running…';
   document.getElementById('range-status').textContent='Fetching & simulating…';
   document.getElementById('range-summary').classList.add('hidden');
   fetch('/api/run-range',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({start,end,instrument})})
+    body:JSON.stringify({start,end})})
   .then(r=>r.json()).then(cache=>{
     btn.disabled=false; btn.textContent='Run Backtest';
     if(cache.error){document.getElementById('range-status').textContent='Error: '+cache.error;return;}
