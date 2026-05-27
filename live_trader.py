@@ -397,22 +397,28 @@ class AngelTrader:
     # ── Order placement ───────────────────────────────────────────
 
     def _order(self, symbol, token, qty, side):
-        resp = self._obj.placeOrder({
-            "variety"         : "NORMAL",
-            "tradingsymbol"   : symbol,
-            "symboltoken"     : token,
-            "transactiontype" : side,          # "BUY" or "SELL"
-            "exchange"        : "NFO",
-            "ordertype"       : "MARKET",
-            "producttype"     : "INTRADAY",
-            "duration"        : "DAY",
-            "quantity"        : str(qty),
-            "price"           : "0",
-            "squareoff"       : "0",
-            "stoploss"        : "0",
-        })
-        logger.info(f"ORDER {side} {symbol} qty={qty}: {resp}")
-        return resp
+        self._ensure_session()
+        try:
+            resp = self._obj.placeOrder({
+                "variety"         : "NORMAL",
+                "tradingsymbol"   : symbol,
+                "symboltoken"     : token,
+                "transactiontype" : side,
+                "exchange"        : "NFO",
+                "ordertype"       : "MARKET",
+                "producttype"     : "INTRADAY",
+                "duration"        : "DAY",
+                "quantity"        : str(qty),
+                "price"           : "0",
+                "squareoff"       : "0",
+                "stoploss"        : "0",
+            })
+            logger.info(f"ORDER {side} {symbol} qty={qty}: {resp}")
+            return resp
+        except Exception as e:
+            logger.error(f"_order exception {side} {symbol}: {e}", exc_info=True)
+            self.last_error = f"Order exception: {e}"
+            return None
 
     # ── Entry ─────────────────────────────────────────────────────
 
@@ -456,7 +462,8 @@ class AngelTrader:
         else:
             resp = self._order(symbol, token, qty, "BUY")
             if not (resp and resp.get("status")):
-                self.last_error = f"Buy order failed: {resp}"
+                msg = resp.get("message","") if isinstance(resp, dict) else str(resp)
+                self.last_error = f"Buy order failed: {msg} | full={resp}"
                 _tg(f"🔴 <b>BUY ORDER FAILED</b>\n"
                     f"Symbol : {symbol}\n"
                     f"Qty    : {qty}\n"
