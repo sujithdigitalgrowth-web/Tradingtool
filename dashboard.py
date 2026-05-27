@@ -166,6 +166,32 @@ def api_force_exit():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/api/test-trade", methods=["POST"])
+def api_test_trade():
+    """Force a real CE buy then auto-exit after 5 seconds — for connectivity testing only."""
+    try:
+        t = get_trader()
+        if not t.connected:
+            return jsonify({"error": "Not connected to Angel One"}), 400
+        if not t._running:
+            return jsonify({"error": "Start Trading first before running test"}), 400
+        if t.position["active"]:
+            return jsonify({"error": "Already in a position — exit it first"}), 400
+
+        entered = t._enter("BUY_CE")
+        if not entered:
+            return jsonify({"error": "Entry failed — check logs (premium out of range or option not found)"}), 500
+
+        def _auto_exit():
+            import time as _t
+            _t.sleep(5)
+            t._exit("TEST_EXIT")
+        threading.Thread(target=_auto_exit, daemon=True).start()
+
+        return jsonify({"status": "ok", "message": "Test CE order placed — auto-exiting in 5 seconds"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 # ── API: Trading config ───────────────────────────────────────────
 
 @app.route("/api/trading-config", methods=["GET"])
@@ -354,6 +380,10 @@ TEMPLATE = r"""
         <button id="btn-force" onclick="forceExit()" style="display:none"
           class="bg-orange-500 hover:bg-orange-600 text-white text-sm font-bold px-5 py-2 rounded transition">
           ⚠ Force Exit
+        </button>
+        <button id="btn-test" onclick="testTrade()" style="display:none"
+          class="bg-purple-600 hover:bg-purple-700 text-white text-sm font-bold px-5 py-2 rounded transition">
+          ⚡ Test Trade
         </button>
       </div>
     </div>
@@ -668,6 +698,7 @@ function refreshLive(){
     document.getElementById('btn-start').style.display = (!isActive&&!isMon)?'':'none';
     document.getElementById('btn-stop') .style.display = isActive?'':'none';
     document.getElementById('btn-force').style.display = isMon ?'':'none';
+    document.getElementById('btn-test') .style.display = (isActive && !pos.active)?'':'none';
 
     // Connection badge
     const cb = document.getElementById('conn-badge');
@@ -835,6 +866,20 @@ function forceExit(){
   fetch('/api/force-exit',{method:'POST'})
     .then(r=>r.json())
     .then(()=>setTimeout(refreshLive,500));
+}
+function testTrade(){
+  if(!confirm('Place a REAL CE order on Angel One and auto-exit in 5 seconds?\n\nThis is for connectivity testing only — a real order will be placed.')) return;
+  const btn=document.getElementById('btn-test');
+  btn.disabled=true; btn.textContent='Placing…';
+  fetch('/api/test-trade',{method:'POST'})
+    .then(r=>r.json())
+    .then(d=>{
+      btn.disabled=false; btn.textContent='⚡ Test Trade';
+      if(d.error){alert('Error: '+d.error);}
+      else{alert('✅ '+d.message+'\n\nWatch the Trades section — entry and exit will appear.');}
+      setTimeout(refreshLive,500);
+      setTimeout(refreshLive,6000);
+    }).catch(e=>{btn.disabled=false;btn.textContent='⚡ Test Trade';alert('Error: '+e);});
 }
 
 // Close modal on background click
