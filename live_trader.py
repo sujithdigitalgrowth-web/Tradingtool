@@ -427,7 +427,18 @@ class AngelTrader:
         expiry = _next_thursday()
         token, symbol = _find_option(self._scrip, strike, opt_type, expiry)
         if not token:
-            logger.error(f"_enter: option not found {strike}{opt_type} {expiry}")
+            # Scan ±5 strikes (±250 pts) before giving up
+            for delta in range(1, 6):
+                for s in (strike - delta * 50, strike + delta * 50):
+                    token, symbol = _find_option(self._scrip, s, opt_type, expiry)
+                    if token:
+                        strike = s
+                        logger.info(f"_enter: ATM not found, using strike={s}")
+                        break
+                if token:
+                    break
+        if not token:
+            logger.error(f"_enter: option not found near {strike}{opt_type} {expiry}")
             return False
 
         qty       = self.lots * bt.LOT_SIZE
