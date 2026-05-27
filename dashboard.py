@@ -178,9 +178,8 @@ def api_test_trade():
         if t.position["active"]:
             return jsonify({"error": "Already in a position — exit it first"}), 400
 
-        force_strike = request.json.get("strike") if request.json else None
-        if force_strike:
-            force_strike = int(force_strike)
+        body = request.get_json(force=True, silent=True) or {}
+        force_strike = int(body["strike"]) if body.get("strike") else None
         entered = t._enter("BUY_CE", force_strike=force_strike)
         if not entered:
             err = t.last_error or "Entry failed — check logs"
