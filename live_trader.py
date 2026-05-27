@@ -462,8 +462,9 @@ class AngelTrader:
         else:
             resp = self._order(symbol, token, qty, "BUY")
             if not (resp and resp.get("status")):
-                msg = resp.get("message","") if isinstance(resp, dict) else str(resp)
-                self.last_error = f"Buy order failed: {msg} | full={resp}"
+                if not self.last_error:   # don't overwrite exception set in _order()
+                    msg = resp.get("message","") if isinstance(resp, dict) else str(resp)
+                    self.last_error = f"Buy order failed: {msg} | full={resp}"
                 _tg(f"🔴 <b>BUY ORDER FAILED</b>\n"
                     f"Symbol : {symbol}\n"
                     f"Qty    : {qty}\n"
