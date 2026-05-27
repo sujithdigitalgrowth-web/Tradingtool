@@ -416,14 +416,15 @@ class AngelTrader:
 
     # ── Entry ─────────────────────────────────────────────────────
 
-    def _enter(self, signal):
+    def _enter(self, signal, force_strike=None):
         opt_type = "CE" if signal == "BUY_CE" else "PE"
         spot     = self.get_nifty_ltp()
         if not spot:
-            logger.warning("_enter: cannot get Nifty LTP")
+            self.last_error = "_enter: cannot get Nifty LTP"
+            logger.warning(self.last_error)
             return False
 
-        strike = int(round(spot / 50) * 50)
+        strike = force_strike if force_strike else int(round(spot / 50) * 50)
         expiry = _next_thursday()
         token, symbol = _find_option(self._scrip, strike, opt_type, expiry)
         if not token:
@@ -438,13 +439,16 @@ class AngelTrader:
                 if token:
                     break
         if not token:
-            logger.error(f"_enter: option not found near {strike}{opt_type} {expiry}")
+            self.last_error = (f"Option not found near {strike}{opt_type} expiry={expiry} "
+                               f"(scrip size={len(self._scrip)})")
+            logger.error(self.last_error)
             return False
 
         qty       = self.lots * bt.LOT_SIZE
         entry_ltp = self.get_option_ltp(symbol, token)
         if not entry_ltp:
-            logger.error(f"_enter: cannot get LTP for {symbol}")
+            self.last_error = f"LTP fetch failed for {symbol} token={token}"
+            logger.error(self.last_error)
             return False
 
         if self.paper_mode:

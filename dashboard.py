@@ -178,9 +178,13 @@ def api_test_trade():
         if t.position["active"]:
             return jsonify({"error": "Already in a position — exit it first"}), 400
 
-        entered = t._enter("BUY_CE")
+        force_strike = request.json.get("strike") if request.json else None
+        if force_strike:
+            force_strike = int(force_strike)
+        entered = t._enter("BUY_CE", force_strike=force_strike)
         if not entered:
-            return jsonify({"error": "Entry failed — check logs (premium out of range or option not found)"}), 500
+            err = t.last_error or "Entry failed — check logs"
+            return jsonify({"error": err}), 500
 
         def _auto_exit():
             import time as _t
@@ -902,7 +906,7 @@ function testTrade(){
   if(!confirm('Place a REAL CE order on Angel One and auto-exit in 5 seconds?\n\nThis is for connectivity testing only — a real order will be placed.')) return;
   const btn=document.getElementById('btn-test');
   btn.disabled=true; btn.textContent='Placing…';
-  fetch('/api/test-trade',{method:'POST'})
+  fetch('/api/test-trade',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({strike:23800})})
     .then(r=>r.json())
     .then(d=>{
       btn.disabled=false; btn.textContent='⚡ Test Trade';
