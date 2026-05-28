@@ -423,6 +423,13 @@ class AngelTrader:
                 logger.info(f"ORDER retry {side} {symbol}: {resp}")
             if resp is None:
                 self.last_error = "placeOrder returned None after session refresh — check Angel One API / network"
+                return None
+            # Some SmartAPI versions return the order ID string directly on success
+            if isinstance(resp, str):
+                resp = {"status": True, "data": {"orderid": resp}} if resp else None
+                if resp is None:
+                    self.last_error = "placeOrder returned empty string"
+                    return None
             return resp
         except Exception as e:
             logger.error(f"_order exception {side} {symbol}: {e}", exc_info=True)
