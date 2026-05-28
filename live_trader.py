@@ -398,22 +398,31 @@ class AngelTrader:
 
     def _order(self, symbol, token, qty, side):
         self._ensure_session()
+        params = {
+            "variety"         : "NORMAL",
+            "tradingsymbol"   : symbol,
+            "symboltoken"     : token,
+            "transactiontype" : side,
+            "exchange"        : "NFO",
+            "ordertype"       : "MARKET",
+            "producttype"     : "INTRADAY",
+            "duration"        : "DAY",
+            "quantity"        : str(qty),
+            "price"           : "0",
+            "squareoff"       : "0",
+            "stoploss"        : "0",
+        }
         try:
-            resp = self._obj.placeOrder({
-                "variety"         : "NORMAL",
-                "tradingsymbol"   : symbol,
-                "symboltoken"     : token,
-                "transactiontype" : side,
-                "exchange"        : "NFO",
-                "ordertype"       : "MARKET",
-                "producttype"     : "INTRADAY",
-                "duration"        : "DAY",
-                "quantity"        : str(qty),
-                "price"           : "0",
-                "squareoff"       : "0",
-                "stoploss"        : "0",
-            })
+            resp = self._obj.placeOrder(params)
             logger.info(f"ORDER {side} {symbol} qty={qty}: {resp}")
+            if resp is None:
+                # placeOrder returned None — session likely stale; refresh and retry once
+                logger.warning("placeOrder returned None — forcing session refresh and retrying")
+                self.login()
+                resp = self._obj.placeOrder(params)
+                logger.info(f"ORDER retry {side} {symbol}: {resp}")
+            if resp is None:
+                self.last_error = "placeOrder returned None after session refresh — check Angel One API / network"
             return resp
         except Exception as e:
             logger.error(f"_order exception {side} {symbol}: {e}", exc_info=True)
