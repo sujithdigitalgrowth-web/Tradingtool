@@ -684,17 +684,26 @@ class AngelTrader:
         trail_exit  = pos["trail_on"] and opt_pct <= trail_floor
 
         # ── Spot-based SL (primary): exit only when Nifty genuinely reverses ──
-        # Prevents theta/IV bleed from triggering SL when trade direction is correct.
+        # Requires 2 consecutive 30-sec polls above threshold to avoid wick exits.
         current_spot = self.get_nifty_ltp()
         entry_spot   = pos.get("entry_spot", 0.0)
+        spot_sl_hit  = False
         if current_spot and entry_spot:
             spot_move = current_spot - entry_spot
             if pos["side"] == "PE" and spot_move > bt.V2_SPOT_SL_PTS:
-                self._exit("SPOT_SL", ltp)
-                return
+                spot_sl_hit = True
             elif pos["side"] == "CE" and spot_move < -bt.V2_SPOT_SL_PTS:
+                spot_sl_hit = True
+
+        if spot_sl_hit:
+            with self._lock:
+                self.position["spot_sl_warn_count"] = pos.get("spot_sl_warn_count", 0) + 1
+            if pos.get("spot_sl_warn_count", 0) + 1 >= 2:
                 self._exit("SPOT_SL", ltp)
                 return
+        else:
+            with self._lock:
+                self.position["spot_sl_warn_count"] = 0
 
         # ── Premium backstop SL (25%): catches catastrophic drops/gaps ──
         # Requires 2 consecutive polls in warning zone to avoid wick exits.
@@ -924,8 +933,9 @@ def _empty_pos():
         "entry_time"   : None,  "partial_done": False,
         "trail_on"     : False, "trail_high"  : 0.0,
         "live_ltp"     : 0.0,   "live_pnl"   : 0.0,
-        "order_id"     : None,
-        "sl_warn_count": 0,    # consecutive 30s polls in SL warning zone
+        "order_id"          : None,
+        "sl_warn_count"     : 0,   # consecutive polls in premium backstop zone
+        "spot_sl_warn_count": 0,   # consecutive polls with spot beyond SL threshold
     }
 
 def _market_open(now: datetime) -> bool:
