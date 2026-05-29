@@ -683,9 +683,21 @@ class AngelTrader:
         trail_floor = bt.V2_TRAIL_FLOOR if pos["partial_done"] else 0.0
         trail_exit  = pos["trail_on"] and opt_pct <= trail_floor
 
-        # SL: immediate if closes below -15%; warning zone -12% to -15%
-        # requires 2 consecutive 30-sec polls (1 min) to confirm real reversal.
-        # Protects against wicks and momentary spikes that recover quickly.
+        # ── Spot-based SL (primary): exit only when Nifty genuinely reverses ──
+        # Prevents theta/IV bleed from triggering SL when trade direction is correct.
+        current_spot = self.get_nifty_ltp()
+        entry_spot   = pos.get("entry_spot", 0.0)
+        if current_spot and entry_spot:
+            spot_move = current_spot - entry_spot
+            if pos["side"] == "PE" and spot_move > bt.V2_SPOT_SL_PTS:
+                self._exit("SPOT_SL", ltp)
+                return
+            elif pos["side"] == "CE" and spot_move < -bt.V2_SPOT_SL_PTS:
+                self._exit("SPOT_SL", ltp)
+                return
+
+        # ── Premium backstop SL (25%): catches catastrophic drops/gaps ──
+        # Requires 2 consecutive polls in warning zone to avoid wick exits.
         sl_triggered = False
         if opt_pct <= -bt.V2_SL_OPTION_PCT:
             sl_triggered = True
