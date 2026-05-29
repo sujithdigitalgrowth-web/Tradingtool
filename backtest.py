@@ -38,9 +38,10 @@ DAILY_PROFIT_TARGET  = 6000
 
 # ── V2 Strategy constants ─────────────────────────────────────────
 V2_TP_OPTION_PCT   = 0.40   # hard take profit
-V2_SL_OPTION_PCT   = 0.25   # premium backstop — only fires if spot SL missed it
-V2_SL_WARN_PCT     = 0.20   # warning zone: 2 consecutive closes needed to trigger backstop
-V2_SPOT_SL_PTS     = 50     # primary SL: exit if Nifty spot moves this many points against trade
+V2_SL_OPTION_PCT   = 0.30   # premium hard stop — immediate exit, no confirmation needed
+V2_SL_WARN_PCT     = 0.22   # premium warning zone — 2 polls needed (slow bleed filter)
+V2_SPOT_SL_WARN    = 50     # spot warning zone — 2 polls needed (small move, wait and see)
+V2_SPOT_SL_HARD    = 80     # spot hard stop — immediate exit (market genuinely reversed)
 V2_PARTIAL_PCT     = 0.20   # exit 50% qty at +20% gain
 V2_TRAIL_TRIGGER   = 0.10   # activate trail at +10%
 V2_TRAIL_FLOOR     = 0.05   # trail stop floor at +5% (protects partial gains)

@@ -683,36 +683,43 @@ class AngelTrader:
         trail_floor = bt.V2_TRAIL_FLOOR if pos["partial_done"] else 0.0
         trail_exit  = pos["trail_on"] and opt_pct <= trail_floor
 
-        # ── Spot-based SL (primary): exit only when Nifty genuinely reverses ──
-        # Requires 2 consecutive 30-sec polls above threshold to avoid wick exits.
+        # ── Spot-based SL (two-tier) ──────────────────────────────────────────
+        # Small breach (WARN pts): market may be consolidating — wait 2 polls.
+        # Large breach (HARD pts): genuine reversal — exit immediately, no wait.
         current_spot = self.get_nifty_ltp()
         entry_spot   = pos.get("entry_spot", 0.0)
-        spot_sl_hit  = False
         if current_spot and entry_spot:
-            spot_move = current_spot - entry_spot
-            if pos["side"] == "PE" and spot_move > bt.V2_SPOT_SL_PTS:
-                spot_sl_hit = True
-            elif pos["side"] == "CE" and spot_move < -bt.V2_SPOT_SL_PTS:
-                spot_sl_hit = True
+            spot_move = abs(current_spot - entry_spot)
+            against   = ((pos["side"] == "PE" and current_spot > entry_spot) or
+                         (pos["side"] == "CE" and current_spot < entry_spot))
+            if against:
+                if spot_move >= bt.V2_SPOT_SL_HARD:
+                    # Big move — exit right now, no confirmation needed
+                    self._exit("SPOT_SL_HARD", ltp)
+                    return
+                elif spot_move >= bt.V2_SPOT_SL_WARN:
+                    # Small breach — need 2 consecutive polls to confirm
+                    with self._lock:
+                        self.position["spot_sl_warn_count"] = pos.get("spot_sl_warn_count", 0) + 1
+                    if pos.get("spot_sl_warn_count", 0) + 1 >= 2:
+                        self._exit("SPOT_SL", ltp)
+                        return
+                else:
+                    with self._lock:
+                        self.position["spot_sl_warn_count"] = 0
+            else:
+                with self._lock:
+                    self.position["spot_sl_warn_count"] = 0
 
-        if spot_sl_hit:
-            with self._lock:
-                self.position["spot_sl_warn_count"] = pos.get("spot_sl_warn_count", 0) + 1
-            if pos.get("spot_sl_warn_count", 0) + 1 >= 2:
-                self._exit("SPOT_SL", ltp)
-                return
-        else:
-            with self._lock:
-                self.position["spot_sl_warn_count"] = 0
-
-        # ── Premium backstop SL (25%): catches catastrophic drops/gaps ──
-        # Requires 2 consecutive polls in warning zone to avoid wick exits.
-        sl_triggered = False
+        # ── Premium backstop (two-tier) ───────────────────────────────────────
+        # Hard stop (-30%): immediate exit — catastrophic drop, no waiting.
+        # Warning zone (-22%): 2 polls needed — filters slow theta bleed.
         if opt_pct <= -bt.V2_SL_OPTION_PCT:
-            sl_triggered = True
-            with self._lock:
-                self.position["sl_warn_count"] = 0
-        elif opt_pct <= -bt.V2_SL_WARN_PCT:
+            self._exit("SL_HARD", ltp)
+            return
+
+        sl_triggered = False
+        if opt_pct <= -bt.V2_SL_WARN_PCT:
             with self._lock:
                 self.position["sl_warn_count"] = pos["sl_warn_count"] + 1
             if pos["sl_warn_count"] + 1 >= 2:
