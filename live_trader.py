@@ -231,11 +231,27 @@ class AngelTrader:
             logger.warning(f"get_balance: {e}")
         return {"available_cash": self.balance, "used_margin": 0, "net": self.balance}
 
+    @staticmethod
+    def _extract_ltp(resp):
+        """Extract LTP from SmartAPI response — handles both full and data-only formats."""
+        if not resp or not isinstance(resp, dict):
+            return None
+        # Full format: {"status": true, "data": {"ltp": "..."}}
+        if resp.get("data") and isinstance(resp["data"], dict):
+            val = resp["data"].get("ltp")
+            if val is not None:
+                return float(val)
+        # Data-only format: {"ltp": "...", "tradingsymbol": "..."}
+        if resp.get("ltp") is not None:
+            return float(resp["ltp"])
+        return None
+
     def get_nifty_ltp(self):
         try:
             resp = self._obj.ltpData("NSE", "NIFTYBEES-EQ", NIFTYBEES_TOKEN)
-            if resp and resp.get("status"):
-                ltp = round(float(resp["data"]["ltp"]) * NIFTY_MULTIPLIER, 2)
+            ltp_val = self._extract_ltp(resp)
+            if ltp_val:
+                ltp = round(ltp_val * NIFTY_MULTIPLIER, 2)
                 self.nifty_ltp = ltp
                 return ltp
         except Exception as e:
@@ -245,8 +261,7 @@ class AngelTrader:
     def get_option_ltp(self, symbol, token):
         try:
             resp = self._obj.ltpData("NFO", symbol, token)
-            if resp and resp.get("status"):
-                return float(resp["data"]["ltp"])
+            return self._extract_ltp(resp)
         except Exception as e:
             logger.warning(f"get_option_ltp {symbol}: {e}")
         return None
