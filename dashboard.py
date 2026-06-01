@@ -132,7 +132,7 @@ def api_live_state():
 @app.route("/api/start-trading", methods=["POST"])
 def api_start_trading():
     body       = request.json or {}
-    max_trades = max(1, min(10, int(body.get("max_trades", 2))))
+    max_trades = max(1, min(5, int(body.get("max_trades", 2))))
     lots       = max(1, min(20, int(body.get("lots", 1))))
     paper      = bool(body.get("paper", False))
     try:
@@ -162,6 +162,14 @@ def api_force_exit():
         cfg = _get_trading_config()
         cfg["active"] = False
         _save_trading_config(cfg)
+        return jsonify({"status": "exited"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/exit-position", methods=["POST"])
+def api_exit_position():
+    try:
+        get_trader().exit_position()
         return jsonify({"status": "exited"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -235,13 +243,93 @@ def api_get_config():
 @app.route("/api/trading-config", methods=["POST"])
 def api_set_config():
     body       = request.json or {}
-    max_trades = max(1, min(10, int(body.get("max_trades", 2))))
+    max_trades = max(1, min(5, int(body.get("max_trades", 2))))
     lots       = max(1, min(20, int(body.get("lots", 1))))
     existing   = _get_trading_config()
     cfg = {"max_trades": max_trades, "lots": lots,
            "paper": existing.get("paper", True), "active": existing.get("active", False)}
     _save_trading_config(cfg)
     return jsonify(cfg)
+
+# ── API: Trade History ───────────────────────────────────────────
+
+TRADE_LOG_FILE = "logs/trade_history.json"
+
+@app.route("/api/trade-history")
+def api_trade_history():
+    from_date = request.args.get("from", "")
+    to_date   = request.args.get("to",   "")
+
+    # Load persisted bot trade log
+    records = []
+    if os.path.exists(TRADE_LOG_FILE):
+        try:
+            with open(TRADE_LOG_FILE) as f:
+                all_trades = json.load(f)
+            for t in all_trades:
+                d = t.get("date", "")
+                if (not from_date or d >= from_date) and (not to_date or d <= to_date):
+                    records.append(t)
+        except Exception:
+            pass
+
+    # Merge Angel One live trade book if today is in range
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    if (not from_date or from_date <= today_str) and (not to_date or to_date >= today_str):
+        try:
+            t = get_trader()
+            if t.connected:
+                resp = t._obj.tradeBook()
+                if resp and resp.get("status") and resp.get("data"):
+                    for row in resp["data"]:
+                        if row.get("transactiontype") == "SELL" and "NIFTY" in row.get("tradingsymbol", ""):
+                            qty    = int(row.get("quantity", 0) or 0)
+                            fill   = float(row.get("averageprice", 0) or 0)
+                            sym    = row.get("tradingsymbol", "")
+                            oid    = row.get("orderid", "")
+                            # skip if already in our log (matched by symbol+exit_time proximity)
+                            already = any(r.get("symbol") == sym and r.get("date") == today_str for r in records)
+                            if not already and qty and fill:
+                                records.append({
+                                    "date"      : today_str,
+                                    "time"      : row.get("updatetime", "")[:5],
+                                    "exit_time" : row.get("updatetime", "")[:5],
+                                    "symbol"    : sym,
+                                    "side"      : "CE" if sym.endswith("CE") else "PE",
+                                    "entry"     : 0.0,
+                                    "exit"      : fill,
+                                    "qty"       : qty,
+                                    "lots"      : qty // 65,
+                                    "capital"   : 0.0,
+                                    "pnl"       : None,
+                                    "pnl_pct"   : None,
+                                    "reason"    : "ANGEL_BOOK",
+                                    "paper"     : False,
+                                    "order_id"  : oid,
+                                })
+        except Exception:
+            pass
+
+    records.sort(key=lambda r: (r.get("date",""), r.get("time","")))
+
+    # Summary stats
+    completed = [r for r in records if r.get("pnl") is not None]
+    total_pnl    = round(sum(r["pnl"] for r in completed), 2)
+    wins         = sum(1 for r in completed if r["pnl"] > 0)
+    win_rate     = round(wins / len(completed) * 100) if completed else 0
+    total_capital = round(sum(r.get("capital", 0) for r in completed), 2)
+
+    return jsonify({
+        "trades"       : records,
+        "summary"      : {
+            "total_trades" : len(completed),
+            "total_pnl"    : total_pnl,
+            "wins"         : wins,
+            "losses"       : len(completed) - wins,
+            "win_rate"     : win_rate,
+            "total_capital": total_capital,
+        }
+    })
 
 # ── API: Backtest (existing) ──────────────────────────────────────
 
@@ -386,8 +474,9 @@ TEMPLATE = r"""
 
 <!-- ── Tabs ── -->
 <div class="flex px-6 pt-3 border-b border-gray-200 bg-white">
-  <button onclick="switchTab('live')"  id="tab-live"  class="tab-a  px-5 py-2 text-sm font-semibold">Live Trading</button>
-  <button onclick="switchTab('range')" id="tab-range" class="tab-i  px-5 py-2 text-sm font-semibold">Backtest Analysis</button>
+  <button onclick="switchTab('live')"    id="tab-live"    class="tab-a  px-5 py-2 text-sm font-semibold">Live Trading</button>
+  <button onclick="switchTab('range')"   id="tab-range"   class="tab-i  px-5 py-2 text-sm font-semibold">Backtest Analysis</button>
+  <button onclick="switchTab('history')" id="tab-history" class="tab-i  px-5 py-2 text-sm font-semibold">Trade History</button>
 </div>
 
 <!-- ══════════════ LIVE TAB ══════════════ -->
@@ -472,7 +561,13 @@ TEMPLATE = r"""
   <div id="pos-card" class="card p-4 hidden">
     <div class="flex items-center justify-between mb-3">
       <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold">Open Position</p>
-      <span id="pos-badge" class="text-xs font-bold px-2 py-0.5 rounded bg-blue-100 text-blue-700">CE</span>
+      <div class="flex items-center gap-2">
+        <span id="pos-badge" class="text-xs font-bold px-2 py-0.5 rounded bg-blue-100 text-blue-700">CE</span>
+        <button onclick="manualExitPosition()"
+          class="text-xs font-bold px-3 py-1 rounded bg-red-100 text-red-700 hover:bg-red-200 transition">
+          ✕ Exit Trade
+        </button>
+      </div>
     </div>
     <div class="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
       <div><p class="text-xs text-gray-400 mb-0.5">Symbol</p><p id="pos-sym" class="font-bold text-gray-900 text-xs"></p></div>
@@ -480,6 +575,21 @@ TEMPLATE = r"""
       <div><p class="text-xs text-gray-400 mb-0.5">Current LTP</p><p id="pos-ltp" class="font-bold text-gray-900"></p></div>
       <div><p class="text-xs text-gray-400 mb-0.5">Live P&amp;L</p><p id="pos-pnl" class="text-xl font-bold"></p></div>
       <div><p class="text-xs text-gray-400 mb-0.5">Entry Time</p><p id="pos-time" class="font-bold text-gray-600"></p></div>
+    </div>
+    <div class="grid grid-cols-3 gap-4 text-sm mt-3 pt-3 border-t border-gray-100">
+      <div>
+        <p class="text-xs text-gray-400 mb-0.5">Stop Loss <span class="text-gray-300">(−30%)</span></p>
+        <p id="pos-sl" class="font-bold text-red-600"></p>
+        <p id="pos-spot-sl" class="text-xs text-red-400 mt-0.5"></p>
+      </div>
+      <div>
+        <p class="text-xs text-gray-400 mb-0.5">Target <span class="text-gray-300">(+40%)</span></p>
+        <p id="pos-target" class="font-bold text-green-600"></p>
+      </div>
+      <div>
+        <p class="text-xs text-gray-400 mb-0.5">Entry Spot</p>
+        <p id="pos-entry-spot" class="font-bold text-gray-700"></p>
+      </div>
     </div>
     <div id="pos-tags" class="flex gap-2 mt-2"></div>
   </div>
@@ -560,6 +670,62 @@ TEMPLATE = r"""
     </div>
   </div>
 </div><!-- /pane-range -->
+
+
+<!-- ══════════════ TRADE HISTORY TAB ══════════════ -->
+<div id="pane-history" class="p-5 hidden space-y-4">
+
+  <!-- Controls -->
+  <div class="card p-4">
+    <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold mb-3">Trade History</p>
+    <div class="flex flex-wrap items-end gap-4">
+      <div>
+        <label class="text-xs text-gray-400 block mb-1">From</label>
+        <input id="hist-from" type="date" class="bg-white border border-gray-300 rounded px-3 py-2 text-sm"/>
+      </div>
+      <div>
+        <label class="text-xs text-gray-400 block mb-1">To</label>
+        <input id="hist-to" type="date" class="bg-white border border-gray-300 rounded px-3 py-2 text-sm"/>
+      </div>
+      <button onclick="loadHistory()"
+        class="bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-bold px-5 py-2 rounded transition">
+        Load History
+      </button>
+    </div>
+  </div>
+
+  <!-- Summary cards -->
+  <div id="hist-summary" class="hidden grid grid-cols-2 md:grid-cols-5 gap-4">
+    <div class="card p-4">
+      <p class="text-xs text-gray-400 mb-1">Total Trades</p>
+      <p id="hs-trades" class="text-2xl font-bold text-gray-900">—</p>
+    </div>
+    <div class="card p-4">
+      <p class="text-xs text-gray-400 mb-1">Total P&amp;L</p>
+      <p id="hs-pnl" class="text-2xl font-bold">—</p>
+    </div>
+    <div class="card p-4">
+      <p class="text-xs text-gray-400 mb-1">Win Rate</p>
+      <p id="hs-wr" class="text-2xl font-bold text-gray-900">—</p>
+    </div>
+    <div class="card p-4">
+      <p class="text-xs text-gray-400 mb-1">Wins / Losses</p>
+      <p id="hs-wl" class="text-2xl font-bold text-gray-900">—</p>
+    </div>
+    <div class="card p-4">
+      <p class="text-xs text-gray-400 mb-1">Capital Deployed</p>
+      <p id="hs-capital" class="text-2xl font-bold text-gray-700">—</p>
+    </div>
+  </div>
+
+  <!-- Table -->
+  <div class="card overflow-hidden">
+    <div id="hist-table-wrap">
+      <p class="text-sm text-gray-400 text-center py-8">Select a date range and click Load History.</p>
+    </div>
+  </div>
+
+</div><!-- /pane-history -->
 
 
 <!-- ══════════════ START TRADING MODAL ══════════════ -->
@@ -644,12 +810,85 @@ setInterval(tick,1000); tick();
 
 // ── Tabs ───────────────────────────────────────────────────────
 function switchTab(name){
-  ['live','range'].forEach(t=>{
+  ['live','range','history'].forEach(t=>{
     document.getElementById('pane-'+t).classList.toggle('hidden',t!==name);
     document.getElementById('tab-'+t).className=
       (t===name?'tab-a':'tab-i')+' px-5 py-2 text-sm font-semibold';
   });
   if(name==='range') loadRangeCache();
+}
+
+// ── Trade History ──────────────────────────────────────────────
+(function initHistDates(){
+  const today = new Date().toISOString().slice(0,10);
+  const month = new Date(new Date().setDate(1)).toISOString().slice(0,10);
+  document.getElementById('hist-from').value = month;
+  document.getElementById('hist-to').value   = today;
+})();
+
+function loadHistory(){
+  const from = document.getElementById('hist-from').value;
+  const to   = document.getElementById('hist-to').value;
+  const wrap = document.getElementById('hist-table-wrap');
+  wrap.innerHTML = '<p class="text-sm text-gray-400 text-center py-8">Loading…</p>';
+  fetch(`/api/trade-history?from=${from}&to=${to}`)
+    .then(r=>r.json())
+    .then(d=>{
+      const s = d.summary || {};
+      document.getElementById('hist-summary').classList.remove('hidden');
+      const pnlEl = document.getElementById('hs-pnl');
+      pnlEl.textContent = (s.total_pnl>=0?'+':'')+inr(s.total_pnl||0);
+      pnlEl.className   = 'text-2xl font-bold '+cls(s.total_pnl||0);
+      document.getElementById('hs-trades') .textContent = s.total_trades||0;
+      document.getElementById('hs-wr')     .textContent = s.total_trades ? (s.win_rate||0)+'%' : '—';
+      document.getElementById('hs-wl')     .textContent = (s.wins||0)+' / '+(s.losses||0);
+      document.getElementById('hs-capital').textContent = s.total_capital ? inr(s.total_capital) : '—';
+      wrap.innerHTML = histTable(d.trades||[]);
+    })
+    .catch(()=>{ wrap.innerHTML='<p class="text-sm text-red-500 text-center py-8">Failed to load.</p>'; });
+}
+
+function histTable(trades){
+  if(!trades||!trades.length)
+    return '<div class="px-4 py-8 text-center text-gray-400 text-sm">No trades found for this period.</div>';
+  const hdr=`<div class="overflow-x-auto"><table class="w-full text-sm">
+    <thead class="bg-gray-50 text-xs text-gray-500 uppercase">
+      <tr>
+        <th class="px-4 py-2 text-left">Date</th>
+        <th class="px-4 py-2 text-left">Symbol</th>
+        <th class="px-4 py-2 text-center">Side</th>
+        <th class="px-4 py-2 text-right">Entry</th>
+        <th class="px-4 py-2 text-right">Exit</th>
+        <th class="px-4 py-2 text-center">Lots</th>
+        <th class="px-4 py-2 text-right">Capital</th>
+        <th class="px-4 py-2 text-right">P&amp;L</th>
+        <th class="px-4 py-2 text-right">P&amp;L %</th>
+        <th class="px-4 py-2 text-center">Exit Reason</th>
+      </tr>
+    </thead><tbody>`;
+  const rows=[...trades].reverse().map(t=>{
+    const hasPnl  = t.pnl != null;
+    const pnlCls  = hasPnl ? cls(t.pnl) : 'text-gray-400';
+    const pnlTxt  = hasPnl ? (t.pnl>=0?'+':'')+inr(t.pnl) : '—';
+    const pctTxt  = hasPnl && t.pnl_pct!=null
+      ? (t.pnl_pct>=0?'+':'')+t.pnl_pct.toFixed(1)+'%' : '—';
+    const pctCls  = hasPnl ? cls(t.pnl) : 'text-gray-400';
+    const sideCls = t.side==='CE'?'bg-blue-100 text-blue-700':'bg-amber-100 text-amber-700';
+    const time    = t.time ? ` <span class="text-gray-400">${t.time}→${t.exit_time||''}</span>` : '';
+    return `<tr class="border-t border-gray-100 hover:bg-gray-50">
+      <td class="px-4 py-2 text-gray-700">${t.date||'—'}${time}</td>
+      <td class="px-4 py-2 font-mono text-xs text-gray-900">${t.symbol||'—'}</td>
+      <td class="px-4 py-2 text-center"><span class="text-xs font-bold px-2 py-0.5 rounded ${sideCls}">${t.side||'—'}</span></td>
+      <td class="px-4 py-2 text-right">${t.entry?'₹'+t.entry.toFixed(2):'—'}</td>
+      <td class="px-4 py-2 text-right">${t.exit?'₹'+t.exit.toFixed(2):'—'}</td>
+      <td class="px-4 py-2 text-center font-bold">${t.lots!=null?t.lots:'—'}</td>
+      <td class="px-4 py-2 text-right">${t.capital?inr(t.capital):'—'}</td>
+      <td class="px-4 py-2 text-right font-bold ${pnlCls}">${pnlTxt}</td>
+      <td class="px-4 py-2 text-right font-bold ${pctCls}">${pctTxt}</td>
+      <td class="px-4 py-2 text-center text-xs text-gray-500">${t.reason||'—'}</td>
+    </tr>`;
+  }).join('');
+  return hdr+rows+`</tbody></table></div>`;
 }
 
 // ── Format helpers ─────────────────────────────────────────────
@@ -790,6 +1029,20 @@ function refreshLive(){
       ppEl.textContent = (pp>=0?'+':'')+inr(pp);
       ppEl.className   = 'text-xl font-bold '+cls(pp);
       document.getElementById('pos-time').textContent = pos.entry_time||'—';
+      // SL / Target / Spot levels
+      const ep = pos.entry_price||0, es = pos.entry_spot||0;
+      document.getElementById('pos-sl')    .textContent = ep ? '₹'+(ep*0.70).toFixed(2) : '—';
+      document.getElementById('pos-target').textContent = ep ? '₹'+(ep*1.40).toFixed(2) : '—';
+      document.getElementById('pos-entry-spot').textContent = es ? '₹'+es.toFixed(0) : '—';
+      // Spot SL hint: 50pt warn / 80pt hard stop on Nifty
+      if(es && pos.side){
+        const warn = pos.side==='CE' ? es-50 : es+50;
+        const hard = pos.side==='CE' ? es-80 : es+80;
+        document.getElementById('pos-spot-sl').textContent =
+          'Nifty SL: ₹'+warn.toFixed(0)+' warn / ₹'+hard.toFixed(0)+' hard';
+      } else {
+        document.getElementById('pos-spot-sl').textContent = '';
+      }
       document.getElementById('pos-badge').textContent = pos.side||'';
       document.getElementById('pos-badge').className =
         'text-xs font-bold px-2 py-0.5 rounded '+
@@ -898,6 +1151,12 @@ function stopTrading(){
 function forceExit(){
   if(!confirm('Exit open position immediately?')) return;
   fetch('/api/force-exit',{method:'POST'})
+    .then(r=>r.json())
+    .then(()=>setTimeout(refreshLive,500));
+}
+function manualExitPosition(){
+  if(!confirm('Exit this trade now? The bot will stay running and can take new entries.')) return;
+  fetch('/api/exit-position',{method:'POST'})
     .then(r=>r.json())
     .then(()=>setTimeout(refreshLive,500));
 }

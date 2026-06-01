@@ -43,8 +43,27 @@ from angel_data import (
 )
 
 # ── File paths ────────────────────────────────────────────────────
-SCRIP_CACHE    = "logs/scrip_nfo.json"
-LIVE_STATE_FILE = "logs/live_state.json"
+SCRIP_CACHE      = "logs/scrip_nfo.json"
+LIVE_STATE_FILE  = "logs/live_state.json"
+TRADE_LOG_FILE   = "logs/trade_history.json"
+
+
+def _append_trade_log(record: dict):
+    """Append a completed trade record to the persistent trade history file."""
+    os.makedirs("logs", exist_ok=True)
+    try:
+        if os.path.exists(TRADE_LOG_FILE):
+            with open(TRADE_LOG_FILE) as f:
+                history = json.load(f)
+        else:
+            history = []
+        history.append(record)
+        tmp = TRADE_LOG_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(history, f, indent=2, default=str)
+        os.replace(tmp, TRADE_LOG_FILE)
+    except Exception as e:
+        logger.warning(f"trade_log append error: {e}")
 
 # ── Timing ────────────────────────────────────────────────────────
 SQUAREOFF_TIME  = "15:15"
@@ -563,28 +582,38 @@ class AngelTrader:
                     f"⚠️ Please exit manually on Angel One app!")
                 return
 
-        pnl = round((ltp - pos["entry_price"]) * pos["qty"], 2)
+        pnl     = round((ltp - pos["entry_price"]) * pos["qty"], 2)
+        pnl_pct = round((ltp - pos["entry_price"]) / pos["entry_price"] * 100, 2) if pos["entry_price"] else 0
+        lots    = pos["qty"] // bt.LOT_SIZE
+        capital = round(pos["entry_price"] * pos["qty"], 2)
+        trade_record = {
+            "date"      : _today().isoformat(),
+            "time"      : pos["entry_time"],
+            "exit_time" : _now().strftime("%H:%M"),
+            "symbol"    : pos["symbol"],
+            "side"      : pos["side"],
+            "strike"    : pos["strike"],
+            "entry"     : pos["entry_price"],
+            "exit"      : round(ltp, 2),
+            "entry_spot": pos["entry_spot"],
+            "qty"       : pos["qty"],
+            "lots"      : lots,
+            "capital"   : capital,
+            "pnl"       : pnl,
+            "pnl_pct"   : pnl_pct,
+            "reason"    : reason,
+            "paper"     : self.paper_mode,
+        }
         with self._lock:
-            self.trades.append({
-                "time"      : pos["entry_time"],
-                "exit_time" : _now().strftime("%H:%M"),
-                "symbol"    : pos["symbol"],
-                "side"      : pos["side"],
-                "strike"    : pos["strike"],
-                "entry"     : pos["entry_price"],
-                "exit"      : round(ltp, 2),
-                "entry_spot": pos["entry_spot"],
-                "qty"       : pos["qty"],
-                "pnl"       : pnl,
-                "reason"    : reason,
-                "paper"     : self.paper_mode,
-            })
+            self.trades.append(trade_record)
             self.daily_pnl   += pnl
             self.trade_count += 1
             if pnl > 0:
                 self.win_count += 1
             self.position  = _empty_pos()
             self.last_signal = None
+
+        _append_trade_log(trade_record)
 
         tag  = "[PAPER] " if self.paper_mode else ""
         icon = "✅" if pnl >= 0 else "🔴"
@@ -608,25 +637,34 @@ class AngelTrader:
                 logger.error(f"Partial sell failed: {resp}")
                 return
 
-        pnl = round((ltp - pos["entry_price"]) * qty, 2)
+        pnl     = round((ltp - pos["entry_price"]) * qty, 2)
+        pnl_pct = round((ltp - pos["entry_price"]) / pos["entry_price"] * 100, 2) if pos["entry_price"] else 0
+        capital = round(pos["entry_price"] * qty, 2)
+        partial_record = {
+            "date"      : _today().isoformat(),
+            "time"      : pos["entry_time"],
+            "exit_time" : _now().strftime("%H:%M"),
+            "symbol"    : pos["symbol"],
+            "side"      : pos["side"],
+            "strike"    : pos["strike"],
+            "entry"     : pos["entry_price"],
+            "exit"      : round(ltp, 2),
+            "entry_spot": pos["entry_spot"],
+            "qty"       : qty,
+            "lots"      : 1,
+            "capital"   : capital,
+            "pnl"       : pnl,
+            "pnl_pct"   : pnl_pct,
+            "reason"    : "PARTIAL_TP",
+            "paper"     : self.paper_mode,
+        }
         with self._lock:
-            self.trades.append({
-                "time"      : pos["entry_time"],
-                "exit_time" : _now().strftime("%H:%M"),
-                "symbol"    : pos["symbol"],
-                "side"      : pos["side"],
-                "strike"    : pos["strike"],
-                "entry"     : pos["entry_price"],
-                "exit"      : round(ltp, 2),
-                "entry_spot": pos["entry_spot"],
-                "qty"       : qty,
-                "pnl"       : pnl,
-                "reason"    : "PARTIAL_TP",
-                "paper"     : self.paper_mode,
-            })
+            self.trades.append(partial_record)
             self.daily_pnl         += pnl
             self.position["qty"]   -= qty
             self.position["partial_done"] = True
+
+        _append_trade_log(partial_record)
 
         tag = "[PAPER] " if self.paper_mode else ""
         logger.info(f"{tag}Partial exit {qty} units @{ltp} pnl={pnl}")
@@ -859,6 +897,12 @@ class AngelTrader:
             self._exit("MANUAL")
         self._running = False
         self.enabled  = False
+        self._save_state()
+
+    def exit_position(self):
+        """Exit the current position but keep the bot running for new entries."""
+        if self.position["active"]:
+            self._exit("MANUAL_EXIT")
         self._save_state()
 
     def get_state(self) -> dict:
