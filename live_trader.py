@@ -522,6 +522,21 @@ class AngelTrader:
                     f"Time   : {_now().strftime('%H:%M:%S')}")
                 return False
             order_id = resp.get("data", {}).get("orderid", "—")
+            # Use actual fill price from Angel One tradeBook
+            try:
+                import time as _time; _time.sleep(1)
+                tb = self._obj.tradeBook()
+                if tb and tb.get("status") and tb.get("data"):
+                    for row in reversed(tb["data"]):
+                        if (row.get("tradingsymbol") == symbol
+                                and row.get("transactiontype") == "BUY"
+                                and row.get("producttype") == "INTRADAY"):
+                            fill = float(row.get("fillprice") or 0)
+                            if fill:
+                                entry_ltp = fill
+                                break
+            except Exception as e:
+                logger.warning(f"Could not fetch entry fill price: {e}")
 
         with self._lock:
             self.position = {
@@ -581,6 +596,21 @@ class AngelTrader:
                     f"Time   : {_now().strftime('%H:%M:%S')}\n"
                     f"⚠️ Please exit manually on Angel One app!")
                 return
+            # Use actual fill price from Angel One tradeBook instead of LTP estimate
+            try:
+                import time as _time; _time.sleep(1)  # brief wait for fill to settle
+                tb = self._obj.tradeBook()
+                if tb and tb.get("status") and tb.get("data"):
+                    for row in reversed(tb["data"]):
+                        if (row.get("tradingsymbol") == pos["symbol"]
+                                and row.get("transactiontype") == "SELL"
+                                and row.get("producttype") == "INTRADAY"):
+                            fill = float(row.get("fillprice") or 0)
+                            if fill:
+                                ltp = fill
+                                break
+            except Exception as e:
+                logger.warning(f"Could not fetch fill price: {e}")
 
         pnl     = round((ltp - pos["entry_price"]) * pos["qty"], 2)
         pnl_pct = round((ltp - pos["entry_price"]) / pos["entry_price"] * 100, 2) if pos["entry_price"] else 0

@@ -259,69 +259,80 @@ TRADE_LOG_FILE = "logs/trade_history.json"
 def api_trade_history():
     from_date = request.args.get("from", "")
     to_date   = request.args.get("to",   "")
-
-    # Load persisted bot trade log
-    records = []
-    if os.path.exists(TRADE_LOG_FILE):
-        try:
-            with open(TRADE_LOG_FILE) as f:
-                all_trades = json.load(f)
-            for t in all_trades:
-                d = t.get("date", "")
-                if (not from_date or d >= from_date) and (not to_date or d <= to_date):
-                    records.append(t)
-        except Exception:
-            pass
-
-    # Merge Angel One live trade book if today is in range
     today_str = datetime.now().strftime("%Y-%m-%d")
-    if (not from_date or from_date <= today_str) and (not to_date or to_date >= today_str):
+
+    records = []
+
+    # ── Today: pull directly from Angel One tradeBook (fill prices) ──
+    today_in_range = (not from_date or from_date <= today_str) and (not to_date or to_date >= today_str)
+    if today_in_range:
         try:
             t = get_trader()
             if t.connected:
                 resp = t._obj.tradeBook()
                 if resp and resp.get("status") and resp.get("data"):
-                    for row in resp["data"]:
-                        if row.get("transactiontype") == "SELL" and "NIFTY" in row.get("tradingsymbol", ""):
-                            qty    = int(row.get("quantity", 0) or 0)
-                            fill   = float(row.get("averageprice", 0) or 0)
-                            sym    = row.get("tradingsymbol", "")
-                            oid    = row.get("orderid", "")
-                            # skip if already in our log (matched by symbol+exit_time proximity)
-                            already = any(r.get("symbol") == sym and r.get("date") == today_str for r in records)
-                            if not already and qty and fill:
-                                records.append({
-                                    "date"      : today_str,
-                                    "time"      : row.get("updatetime", "")[:5],
-                                    "exit_time" : row.get("updatetime", "")[:5],
-                                    "symbol"    : sym,
-                                    "side"      : "CE" if sym.endswith("CE") else "PE",
-                                    "entry"     : 0.0,
-                                    "exit"      : fill,
-                                    "qty"       : qty,
-                                    "lots"      : qty // 65,
-                                    "capital"   : 0.0,
-                                    "pnl"       : None,
-                                    "pnl_pct"   : None,
-                                    "reason"    : "ANGEL_BOOK",
-                                    "paper"     : False,
-                                    "order_id"  : oid,
-                                })
+                    fills = [r for r in resp["data"] if "NIFTY" in r.get("tradingsymbol", "")
+                             and r.get("producttype") == "INTRADAY"]
+                    # Group BUY+SELL pairs by symbol
+                    buys  = {r["tradingsymbol"]: r for r in fills if r.get("transactiontype") == "BUY"}
+                    sells = {r["tradingsymbol"]: r for r in fills if r.get("transactiontype") == "SELL"}
+                    for sym, sell in sells.items():
+                        buy = buys.get(sym)
+                        qty        = int(sell.get("fillsize") or sell.get("quantity") or 0)
+                        exit_fill  = float(sell.get("fillprice") or 0)
+                        entry_fill = float(buy.get("fillprice") or 0) if buy else 0.0
+                        if not qty or not exit_fill:
+                            continue
+                        pnl     = round((exit_fill - entry_fill) * qty, 2) if entry_fill else None
+                        pnl_pct = round((exit_fill - entry_fill) / entry_fill * 100, 2) if entry_fill else None
+                        capital = round(entry_fill * qty, 2) if entry_fill else None
+                        ftime   = sell.get("filltime", "")[:5]
+                        btime   = buy.get("filltime", "")[:5] if buy else ""
+                        records.append({
+                            "date"      : today_str,
+                            "time"      : btime,
+                            "exit_time" : ftime,
+                            "symbol"    : sym,
+                            "side"      : "CE" if sym.endswith("CE") else "PE",
+                            "strike"    : int(sell.get("strikeprice") or 0),
+                            "entry"     : entry_fill,
+                            "exit"      : exit_fill,
+                            "qty"       : qty,
+                            "lots"      : qty // 65,
+                            "capital"   : capital,
+                            "pnl"       : pnl,
+                            "pnl_pct"   : pnl_pct,
+                            "reason"    : "ANGEL_FILL",
+                            "paper"     : False,
+                        })
+        except Exception:
+            pass
+
+    # ── Historical: load from persisted trade log (past days only) ──
+    if os.path.exists(TRADE_LOG_FILE):
+        try:
+            with open(TRADE_LOG_FILE) as f:
+                all_trades = json.load(f)
+            for tr in all_trades:
+                d = tr.get("date", "")
+                if d == today_str:
+                    continue   # today is covered by Angel One above
+                if (not from_date or d >= from_date) and (not to_date or d <= to_date):
+                    records.append(tr)
         except Exception:
             pass
 
     records.sort(key=lambda r: (r.get("date",""), r.get("time","")))
 
-    # Summary stats
-    completed = [r for r in records if r.get("pnl") is not None]
-    total_pnl    = round(sum(r["pnl"] for r in completed), 2)
-    wins         = sum(1 for r in completed if r["pnl"] > 0)
-    win_rate     = round(wins / len(completed) * 100) if completed else 0
-    total_capital = round(sum(r.get("capital", 0) for r in completed), 2)
+    completed     = [r for r in records if r.get("pnl") is not None]
+    total_pnl     = round(sum(r["pnl"] for r in completed), 2)
+    wins          = sum(1 for r in completed if r["pnl"] > 0)
+    win_rate      = round(wins / len(completed) * 100) if completed else 0
+    total_capital = round(sum(r.get("capital") or 0 for r in completed), 2)
 
     return jsonify({
-        "trades"       : records,
-        "summary"      : {
+        "trades"  : records,
+        "summary" : {
             "total_trades" : len(completed),
             "total_pnl"    : total_pnl,
             "wins"         : wins,
