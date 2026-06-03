@@ -553,6 +553,7 @@ class AngelTrader:
                 "strike"       : strike,
                 "expiry"       : str(expiry),
                 "qty"          : qty,
+                "initial_qty"  : qty,
                 "entry_price"  : round(entry_ltp, 2),
                 "entry_spot"   : round(spot, 2),
                 "entry_time"   : _now().strftime("%H:%M"),
@@ -704,11 +705,11 @@ class AngelTrader:
 
         tag = "[PAPER] " if self.paper_mode else ""
         logger.info(f"{tag}Partial exit {qty} units @{ltp} pnl={pnl}")
-        _tg(f"🟡 <b>{tag}PARTIAL EXIT +20%</b>\n"
+        _tg(f"🟡 <b>{tag}PARTIAL EXIT +10%</b>\n"
             f"Symbol : {pos['symbol']}\n"
             f"Sold   : {qty} qty (1 lot)\n"
             f"LTP    : ₹{ltp:.2f}  P&L: +₹{pnl:,.2f}\n"
-            f"Remaining: {pos['qty'] - qty} qty — running to TARGET\n"
+            f"Remaining: {pos['qty'] - qty} qty — running to +20% TARGET\n"
             f"Time   : {_now().strftime('%H:%M')}")
         self._save_state()
 
@@ -736,8 +737,18 @@ class AngelTrader:
             self.position["live_ltp"] = round(ltp, 2)
             self.position["live_pnl"] = round(pnl_pu * pos["qty"], 2)
 
-        # Partial exit at +20% (only when 2+ lots)
-        if (not pos["partial_done"]
+        is_one_lot = pos.get("initial_qty", pos["qty"]) == bt.LOT_SIZE
+
+        # 1-lot: exit at +10% OR ₹1,100 — whichever comes first
+        if is_one_lot:
+            abs_pnl = (ltp - pos["entry_price"]) * bt.LOT_SIZE
+            if opt_pct >= bt.V2_1LOT_TP_PCT or abs_pnl >= bt.V2_1LOT_TP_RUPEES:
+                self._exit("TARGET", ltp)
+                return
+
+        # 2-lot: partial exit at +10%
+        if (not is_one_lot
+                and not pos["partial_done"]
                 and opt_pct >= bt.V2_PARTIAL_PCT
                 and pos["qty"] >= bt.LOT_SIZE * 2):
             self._partial_exit(ltp)
@@ -753,7 +764,7 @@ class AngelTrader:
                 if ltp > pos["trail_high"]:
                     self.position["trail_high"] = ltp
 
-        # Exit conditions
+        # After partial, SL steps to breakeven (trail_floor = 0%)
         trail_floor = bt.V2_TRAIL_FLOOR if pos["partial_done"] else 0.0
         trail_exit  = pos["trail_on"] and opt_pct <= trail_floor
 
@@ -786,8 +797,8 @@ class AngelTrader:
                     self.position["spot_sl_warn_count"] = 0
 
         # ── Premium backstop (two-tier) ───────────────────────────────────────
-        # Hard stop (-30%): immediate exit — catastrophic drop, no waiting.
-        # Warning zone (-22%): 2 polls needed — filters slow theta bleed.
+        # Hard stop (-20%): immediate exit — no waiting.
+        # Warning zone (-13%): 2 polls needed — filters slow theta bleed.
         if opt_pct <= -bt.V2_SL_OPTION_PCT:
             self._exit("SL_HARD", ltp)
             return

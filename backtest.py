@@ -37,14 +37,16 @@ MAX_DAILY_LOSS       = -8000
 DAILY_PROFIT_TARGET  = 6000
 
 # ── V2 Strategy constants ─────────────────────────────────────────
-V2_TP_OPTION_PCT   = 0.40   # hard take profit
-V2_SL_OPTION_PCT   = 0.30   # premium hard stop — immediate exit, no confirmation needed
-V2_SL_WARN_PCT     = 0.22   # premium warning zone — 2 polls needed (slow bleed filter)
+V2_TP_OPTION_PCT   = 0.20   # 2-lot: remaining lot hard TP at +20%
+V2_SL_OPTION_PCT   = 0.20   # premium hard stop — immediate exit, no confirmation needed
+V2_SL_WARN_PCT     = 0.13   # premium warning zone — 2 polls needed (slow bleed filter)
 V2_SPOT_SL_WARN    = 50     # spot warning zone — 2 polls needed (small move, wait and see)
 V2_SPOT_SL_HARD    = 80     # spot hard stop — immediate exit (market genuinely reversed)
-V2_PARTIAL_PCT     = 0.20   # exit 50% qty at +20% gain
+V2_PARTIAL_PCT     = 0.10   # 2-lot: partial exit 1 lot at +10%
 V2_TRAIL_TRIGGER   = 0.10   # activate trail at +10%
-V2_TRAIL_FLOOR     = 0.05   # trail stop floor at +5% (protects partial gains)
+V2_TRAIL_FLOOR     = 0.00   # after partial: SL steps to breakeven (0%)
+V2_1LOT_TP_PCT     = 0.10   # 1-lot: exit at +10% option gain …
+V2_1LOT_TP_RUPEES  = 1100   # … or ₹1,100 absolute P&L — whichever comes first
 V2_VOL_SURGE_MULT  = 1.5    # volume > 1.5× 20-bar avg
 V2_EMA_FAST        = 9      # fast EMA — entry filter + exit trigger
 V2_EMA_SLOW        = 20     # slow EMA — trend direction
@@ -431,13 +433,13 @@ def simulate_day(target_date: date,
             if not position["trail_on"] and opt_pct >= V2_TRAIL_TRIGGER:
                 position["trail_on"] = True
 
-            # ── Partial exit at +20% (only when holding 2+ lots) ────
+            # ── Partial exit at +10% (only when holding 2+ lots) ────
             # Minimum tradeable unit on NSE is 1 full lot (LOT_SIZE units).
-            # If only 1 lot is held, skip partial — exit the whole lot at TP.
+            # If only 1 lot is held, skip partial — exit via 1-lot TARGET logic.
             if (not position["partial_done"]
                     and opt_pct >= V2_PARTIAL_PCT
                     and position["qty"] >= LOT_SIZE * 2):
-                # Exit exactly 1 lot; pin to exact +20% price so P&L is not
+                # Exit exactly 1 lot; pin to exact +10% price so P&L is not
                 # inflated if TARGET also triggers in the same candle.
                 p_pnl_pu = position["entry_option_price"] * V2_PARTIAL_PCT
                 p_spot   = (position["entry_spot"] + p_pnl_pu / 0.5
@@ -449,14 +451,16 @@ def simulate_day(target_date: date,
                 position["qty"]          -= LOT_SIZE
                 position["partial_done"]  = True
 
-            # After partial, raise trail floor to +5%
+            # After partial, SL steps to breakeven (trail_floor = 0%)
             trail_floor = V2_TRAIL_FLOOR if position["partial_done"] else 0.0
 
+            # ── TARGET condition — differs for 1-lot vs 2-lot ───────────
+            is_one_lot = position["initial_qty"] == LOT_SIZE
+            abs_pnl    = pnl_pu * position["qty"]
+            tp_hit = ((opt_pct >= V2_1LOT_TP_PCT or abs_pnl >= V2_1LOT_TP_RUPEES)
+                      if is_one_lot else opt_pct >= V2_TP_OPTION_PCT)
+
             # ── SL logic: 2-close confirmation for boundary zone ────────
-            # Immediate SL: candle closes below -15% (strong reversal confirmed)
-            # Warning zone: candle closes between -12% and -15% — need 2
-            #   consecutive such closes before exiting (protects against wicks
-            #   and single-candle overshoots that recover next candle).
             if opt_pct <= -V2_SL_OPTION_PCT:
                 hard_action = "SL"                       # immediate — no ambiguity
                 position["sl_warn_count"] = 0
@@ -465,10 +469,10 @@ def simulate_day(target_date: date,
                 hard_action = "SL" if position["sl_warn_count"] >= 2 else "HOLD"
             else:
                 position["sl_warn_count"] = 0            # recovered — reset counter
-                hard_action = "TARGET" if opt_pct >= V2_TP_OPTION_PCT else "HOLD"
+                hard_action = "TARGET" if tp_hit else "HOLD"
 
             if hard_action != "SL":
-                hard_action = ("TARGET" if opt_pct >= V2_TP_OPTION_PCT else "HOLD")
+                hard_action = "TARGET" if tp_hit else "HOLD"
 
             trail_exit  = position["trail_on"] and opt_pct <= trail_floor
             ema_exit    = ((position["type"] == "CE" and cl < ef) or
@@ -491,7 +495,13 @@ def simulate_day(target_date: date,
                 # Pin TARGET/SL exits to their exact threshold prices too,
                 # so the recorded opt-out price matches the stated exit rule.
                 if exit_reason == "TARGET":
-                    e_pnl_pu = position["entry_option_price"] * V2_TP_OPTION_PCT
+                    if is_one_lot:
+                        # Pin to whichever threshold triggered first
+                        pct_pnl  = position["entry_option_price"] * V2_1LOT_TP_PCT
+                        rupi_pnl = V2_1LOT_TP_RUPEES / position["qty"]
+                        e_pnl_pu = min(pct_pnl, rupi_pnl)
+                    else:
+                        e_pnl_pu = position["entry_option_price"] * V2_TP_OPTION_PCT
                     e_spot   = (position["entry_spot"] + e_pnl_pu / 0.5
                                 if position["type"] == "CE"
                                 else position["entry_spot"] - e_pnl_pu / 0.5)
