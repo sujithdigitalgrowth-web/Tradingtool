@@ -344,9 +344,13 @@ class AngelTrader:
         if df_nbees is None or df_nbees.empty or not isinstance(df_nbees.index, pd.DatetimeIndex):
             self.sig_info["filter_reason"] = "Data fetch error — bad index (RangeIndex)"
             return None, vix_val
-        sday = df_nbees[df_nbees.index.date == today].between_time("09:15", "15:30")
-        if len(sday) < bt.V2_EMA_SLOW + 2:
-            self.sig_info["filter_reason"] = f"Not enough candles ({len(sday)}, need {bt.V2_EMA_SLOW + 2})"
+        # Use all available history (prev days + today) to warm up EMA/RSI/Supertrend
+        # so signals can fire from the first candle of the day. VWAP and vol MA
+        # are inherently daily and stay today-only.
+        all_5m = df_nbees[df_nbees.index.date <= today].between_time("09:15", "15:30")
+        sday   = all_5m[all_5m.index.date == today]
+        if sday.empty:
+            self.sig_info["filter_reason"] = "No candles for today yet"
             return None, vix_val
 
         # Time window check
@@ -366,13 +370,15 @@ class AngelTrader:
             self.sig_info["filter_reason"] = "No prev-day data"
             return None, vix_val
 
-        # Compute indicators on NIFTYBEES ETF prices
+        # Compute indicators — EMA/RSI/Supertrend run on multi-day history so
+        # they arrive pre-warmed; extract today's slice for signal reads.
+        # VWAP and vol MA reset each day and stay today-only.
         vwap_s  = bt._vwap(sday)
-        ema_f   = sday["Close"].ewm(span=bt.V2_EMA_FAST,  adjust=False).mean()
-        ema_s   = sday["Close"].ewm(span=bt.V2_EMA_SLOW,  adjust=False).mean()
-        vol_ma  = sday["Volume"].rolling(20).mean()
-        rsi_s   = bt._rsi(sday["Close"], bt.V2_RSI_PERIOD)
-        st_s    = bt._supertrend(sday, bt.V2_ST_PERIOD, bt.V2_ST_MULT)
+        vol_ma  = sday["Volume"].rolling(20, min_periods=5).mean()
+        ema_f   = all_5m["Close"].ewm(span=bt.V2_EMA_FAST, adjust=False).mean().loc[sday.index]
+        ema_s   = all_5m["Close"].ewm(span=bt.V2_EMA_SLOW, adjust=False).mean().loc[sday.index]
+        rsi_s   = bt._rsi(all_5m["Close"], bt.V2_RSI_PERIOD).loc[sday.index]
+        st_s    = bt._supertrend(all_5m, bt.V2_ST_PERIOD, bt.V2_ST_MULT).loc[sday.index]
 
         bnf_day  = (df_bnf[df_bnf.index.date == today].between_time("09:15", "15:30")
                     if df_bnf is not None and not df_bnf.empty
