@@ -57,7 +57,7 @@ V2_ATR_PERIOD      = 14
 V2_REV_ATR_MULT    = 2.0
 V2_NO_ENTRY_BEFORE = "09:30"   # start earlier — catch opening momentum
 V2_MAX_TRADES      = 2         # allow 2 trades per day (morning + afternoon)
-V2_SKIP_THURSDAY   = True      # avoid Nifty weekly expiry day
+V2_SKIP_THURSDAY   = False     # trade Thursday morning only (afternoon blocked separately)
 V2_VIX_MIN         = 15        # India VIX lower bound — below 15 premiums too thin to buy
 V2_VIX_MAX         = 30        # raised from 22 — VIX 22-30 still tradeable with good premiums
 V2_MORNING_END     = "12:00"   # extended morning window
@@ -310,10 +310,8 @@ def simulate_day(target_date: date,
     trail floor, Thursday skip, BNF alignment, trail trigger,
     India VIX filter, time window, Supertrend, 2m signals.
     """
-    # ── Thursday skip (weekly expiry) ────────────────────────────
-    if V2_SKIP_THURSDAY and target_date.weekday() == 3:
-        return _no_trade_result(target_date, df_5m_all, df_1d_all,
-                                note="Thursday — weekly expiry skip")
+    # ── Thursday: morning only (no afternoon — too much theta decay) ─
+    is_thursday = target_date.weekday() == 3
 
     # ── India VIX filter ─────────────────────────────────────────
     if df_vix is not None and not df_vix.empty:
@@ -522,7 +520,7 @@ def simulate_day(target_date: date,
 
         # ── Entry gate ────────────────────────────────────────────
         in_morning   = V2_NO_ENTRY_BEFORE <= time_str <= V2_MORNING_END
-        in_afternoon = V2_AFTERNOON_START  <= time_str <  NO_ENTRY_AFTER
+        in_afternoon = (V2_AFTERNOON_START <= time_str < NO_ENTRY_AFTER) and not is_thursday
         in_window    = in_morning or in_afternoon
 
         if (not position["active"]

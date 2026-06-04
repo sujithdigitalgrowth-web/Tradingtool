@@ -353,12 +353,15 @@ class AngelTrader:
             self.sig_info["filter_reason"] = "No candles for today yet"
             return None, vix_val
 
-        # Time window check
-        ts = now.strftime("%H:%M")
+        # Time window check — Thursday: morning only (afternoon skipped, theta too high)
+        ts           = now.strftime("%H:%M")
+        is_thursday  = today.weekday() == 3
         in_morning   = bt.V2_NO_ENTRY_BEFORE <= ts <= bt.V2_MORNING_END
-        in_afternoon = bt.V2_AFTERNOON_START  <= ts <  bt.NO_ENTRY_AFTER
+        in_afternoon = (bt.V2_AFTERNOON_START <= ts < bt.NO_ENTRY_AFTER) and not is_thursday
         if not (in_morning or in_afternoon):
-            self.sig_info["filter_reason"] = f"Outside trading window ({bt.V2_NO_ENTRY_BEFORE}–{bt.V2_MORNING_END} / {bt.V2_AFTERNOON_START}–{bt.NO_ENTRY_AFTER})"
+            reason = "Thursday — afternoon blocked (expiry theta)" if is_thursday and ts >= bt.V2_AFTERNOON_START \
+                     else f"Outside trading window ({bt.V2_NO_ENTRY_BEFORE}–{bt.V2_MORNING_END} / {bt.V2_AFTERNOON_START}–{bt.NO_ENTRY_AFTER})"
+            self.sig_info["filter_reason"] = reason
             return None, vix_val
 
         # Prev close
@@ -838,7 +841,7 @@ class AngelTrader:
                         and self.enabled
                         and not self.position["active"]
                         and self.trade_count < self.max_trades
-                        and not (bt.V2_SKIP_THURSDAY and _today().weekday() == 3)):
+                        ):
                     # Always update timing so dashboard shows loop is alive
                     next_t = _next_candle(now)
                     self.sig_info["time"]       = now.strftime("%H:%M:%S")
