@@ -742,10 +742,10 @@ class AngelTrader:
 
         is_one_lot = pos.get("initial_qty", pos["qty"]) == bt.LOT_SIZE
 
-        # 1-lot: exit when BOTH +10% AND ₹1,100 are hit — whichever is highest
+        # 1-lot: exit at +10% OR ₹1,100 — whichever comes first
         if is_one_lot:
             abs_pnl = (ltp - pos["entry_price"]) * bt.LOT_SIZE
-            if opt_pct >= bt.V2_1LOT_TP_PCT and abs_pnl >= bt.V2_1LOT_TP_RUPEES:
+            if opt_pct >= bt.V2_1LOT_TP_PCT or abs_pnl >= bt.V2_1LOT_TP_RUPEES:
                 self._exit("TARGET", ltp)
                 return
 
