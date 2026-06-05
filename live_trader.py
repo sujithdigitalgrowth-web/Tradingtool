@@ -413,32 +413,6 @@ class AngelTrader:
         raw_sell = (cl < vw and cl < ef and cl < es and cl < op
                     and vol_surge and rsi < bt.V2_RSI_MAX_PE and bnf_bear and st == -1)
 
-        # ── Live bias + move-exhaustion filters ──────────────────
-        prev_nbees_data  = all_5m[all_5m.index.date < today]
-        nbees_day_open   = float(sday.iloc[0]["Open"]) if not sday.empty else None
-        prev_nbees_close = float(prev_nbees_data["Close"].iloc[-1]) if not prev_nbees_data.empty else None
-
-        if prev_nbees_close:
-            # Live bias: current NIFTYBEES vs prev close — updates every candle
-            # If market was gap-down but has recovered above prev close, CE is allowed
-            live_bias = "CE" if cl >= prev_nbees_close else "PE"
-            if raw_buy and live_bias == "PE":
-                raw_buy = False
-                self.sig_info["filter_reason"] = f"Live bias PE (price below prev close {prev_nbees_close:.2f}) — CE blocked"
-            if raw_sell and live_bias == "CE":
-                raw_sell = False
-                self.sig_info["filter_reason"] = f"Live bias CE (price above prev close {prev_nbees_close:.2f}) — PE blocked"
-
-        if nbees_day_open and nbees_day_open > 0:
-            # Move-exhaustion: block entry if already moved 0.3%+ (~70pts) from open in trade direction
-            move_pct = (cl - nbees_day_open) / nbees_day_open * 100
-            if raw_buy and move_pct > bt.V2_MAX_MOVE_PCT:
-                raw_buy = False
-                self.sig_info["filter_reason"] = f"CE blocked — already +{move_pct:.1f}% from open (move exhausted)"
-            if raw_sell and move_pct < -bt.V2_MAX_MOVE_PCT:
-                raw_sell = False
-                self.sig_info["filter_reason"] = f"PE blocked — already {move_pct:.1f}% from open (move exhausted)"
-
         # Build human-readable reason for dashboard when no signal fires
         if not raw_buy and not raw_sell:
             reasons = []
