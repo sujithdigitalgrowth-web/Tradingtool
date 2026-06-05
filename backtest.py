@@ -303,7 +303,8 @@ def simulate_day(target_date: date,
                  df_1d_all:  pd.DataFrame,
                  df_nbees:   pd.DataFrame = None,
                  df_bnf:     pd.DataFrame = None,
-                 df_vix:     pd.DataFrame = None):
+                 df_vix:     pd.DataFrame = None,
+                 entry_mode: str = "v2"):
     """
     Simulate V2 strategy for one trading day.
     All 11 improvements active: dual EMA, RSI, partial exit,
@@ -527,15 +528,21 @@ def simulate_day(target_date: date,
                 and daily_pnl < DAILY_PROFIT_TARGET
                 and vm > 0):
 
-            vol_surge = vol > vm * V2_VOL_SURGE_MULT
-
-            # All conditions: VWAP + dual EMA + volume + RSI + BNF + Supertrend
-            raw_buy  = (cl > vw and cl > ef and cl > es and cl > op
-                        and vol_surge and rsi > V2_RSI_MIN_CE
-                        and bnf_bull and st == 1)
-            raw_sell = (cl < vw and cl < ef and cl < es and cl < op
-                        and vol_surge and rsi < V2_RSI_MAX_PE
-                        and bnf_bear and st == -1)
+            if entry_mode == "v14":
+                # V14: simpler entry — VWAP + EMA20 + green/red candle + volume 1.1x
+                # Removes EMA9, RSI, BankNifty, Supertrend — enters earlier in a move
+                vol_surge = vol > vm * 1.1
+                raw_buy  = cl > vw and cl > es and cl > op and vol_surge
+                raw_sell = cl < vw and cl < es and cl < op and vol_surge
+            else:
+                # V2: full conditions — VWAP + dual EMA + volume + RSI + BNF + Supertrend
+                vol_surge = vol > vm * V2_VOL_SURGE_MULT
+                raw_buy  = (cl > vw and cl > ef and cl > es and cl > op
+                            and vol_surge and rsi > V2_RSI_MIN_CE
+                            and bnf_bull and st == 1)
+                raw_sell = (cl < vw and cl < ef and cl < es and cl < op
+                            and vol_surge and rsi < V2_RSI_MAX_PE
+                            and bnf_bear and st == -1)
 
             signal = None
             if raw_buy  and last_signal != "buy":
