@@ -9,9 +9,15 @@ END   = date.today() - timedelta(days=1)
 START = END - timedelta(days=57)
 
 print(f"\nBacktest range: {START} to {END}")
-print("Fetching data (this takes ~30 seconds)...\n")
+print("Fetching data via Angel One (this takes ~60 seconds)...\n")
 
-df_5m, df_1d, df_nbees, df_bnf, df_vix = bt.fetch_range_data_v2(START, END)
+try:
+    df_5m, df_1d, df_nbees, df_bnf, df_vix = bt.fetch_range_data_angel(START, END)
+    print("Angel One data fetched successfully.\n")
+except Exception as e:
+    print(f"Angel One fetch failed: {e}")
+    print("Trying Yahoo Finance fallback...")
+    df_5m, df_1d, df_nbees, df_bnf, df_vix = bt.fetch_range_data_v2(START, END)
 
 def run(label, use_bias, use_move):
     bt.V2_USE_BIAS_FILTER = use_bias
