@@ -455,7 +455,7 @@ def simulate_day(target_date: date,
             # ── TARGET condition — differs for 1-lot vs 2-lot ───────────
             is_one_lot = position["initial_qty"] == LOT_SIZE
             abs_pnl    = pnl_pu * position["qty"]
-            tp_hit = ((opt_pct >= V2_1LOT_TP_PCT or abs_pnl >= V2_1LOT_TP_RUPEES)
+            tp_hit = ((opt_pct >= V2_1LOT_TP_PCT and abs_pnl >= V2_1LOT_TP_RUPEES)
                       if is_one_lot else opt_pct >= V2_TP_OPTION_PCT)
 
             # ── SL logic: 2-close confirmation for boundary zone ────────

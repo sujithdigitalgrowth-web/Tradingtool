@@ -594,7 +594,7 @@ TEMPLATE = r"""
         <p id="pos-spot-sl" class="text-xs text-red-400 mt-0.5"></p>
       </div>
       <div>
-        <p class="text-xs text-gray-400 mb-0.5">Target <span class="text-gray-300">(+20%)</span></p>
+        <p class="text-xs text-gray-400 mb-0.5">Target <span class="text-gray-300">(+10%)</span></p>
         <p id="pos-target" class="font-bold text-green-600"></p>
       </div>
       <div>
@@ -1043,7 +1043,7 @@ function refreshLive(){
       // SL / Target / Spot levels
       const ep = pos.entry_price||0, es = pos.entry_spot||0;
       document.getElementById('pos-sl')    .textContent = ep ? '₹'+(ep*0.80).toFixed(2) : '—';
-      document.getElementById('pos-target').textContent = ep ? '₹'+(ep*1.20).toFixed(2) : '—';
+      document.getElementById('pos-target').textContent = ep ? '₹'+(ep*1.10).toFixed(2) : '—';
       document.getElementById('pos-entry-spot').textContent = es ? '₹'+es.toFixed(0) : '—';
       // Spot SL hint: 50pt warn / 80pt hard stop on Nifty
       if(es && pos.side){
