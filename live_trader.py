@@ -413,23 +413,24 @@ class AngelTrader:
         raw_sell = (cl < vw and cl < ef and cl < es and cl < op
                     and vol_surge and rsi < bt.V2_RSI_MAX_PE and bnf_bear and st == -1)
 
-        # ── Day bias filter ───────────────────────────────────────
-        # Block CE on gap-down days, PE on gap-up days
-        prev_nbees_data = all_5m[all_5m.index.date < today]
-        nbees_day_open  = float(sday.iloc[0]["Open"]) if not sday.empty else None
+        # ── Live bias + move-exhaustion filters ──────────────────
+        prev_nbees_data  = all_5m[all_5m.index.date < today]
+        nbees_day_open   = float(sday.iloc[0]["Open"]) if not sday.empty else None
         prev_nbees_close = float(prev_nbees_data["Close"].iloc[-1]) if not prev_nbees_data.empty else None
-        if nbees_day_open and prev_nbees_close:
-            day_bias = "CE" if nbees_day_open >= prev_nbees_close else "PE"
-            if raw_buy and day_bias == "PE":
-                raw_buy = False
-                self.sig_info["filter_reason"] = "Day bias PE (gap-down open) — CE blocked"
-            if raw_sell and day_bias == "CE":
-                raw_sell = False
-                self.sig_info["filter_reason"] = "Day bias CE (gap-up open) — PE blocked"
 
-        # ── Move-exhaustion filter ────────────────────────────────
-        # Block entry if market already moved 0.5%+ from today's open in trade direction
+        if prev_nbees_close:
+            # Live bias: current NIFTYBEES vs prev close — updates every candle
+            # If market was gap-down but has recovered above prev close, CE is allowed
+            live_bias = "CE" if cl >= prev_nbees_close else "PE"
+            if raw_buy and live_bias == "PE":
+                raw_buy = False
+                self.sig_info["filter_reason"] = f"Live bias PE (price below prev close {prev_nbees_close:.2f}) — CE blocked"
+            if raw_sell and live_bias == "CE":
+                raw_sell = False
+                self.sig_info["filter_reason"] = f"Live bias CE (price above prev close {prev_nbees_close:.2f}) — PE blocked"
+
         if nbees_day_open and nbees_day_open > 0:
+            # Move-exhaustion: block entry if already moved 0.3%+ (~70pts) from open in trade direction
             move_pct = (cl - nbees_day_open) / nbees_day_open * 100
             if raw_buy and move_pct > bt.V2_MAX_MOVE_PCT:
                 raw_buy = False

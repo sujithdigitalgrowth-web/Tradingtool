@@ -47,7 +47,7 @@ V2_TRAIL_TRIGGER   = 0.10   # activate trail at +10%
 V2_TRAIL_FLOOR     = 0.00   # after partial: SL steps to breakeven (0%)
 V2_1LOT_TP_PCT     = 0.10   # 1-lot: exit at +10% option gain …
 V2_1LOT_TP_RUPEES  = 1100   # … or ₹1,100 absolute P&L — whichever comes first
-V2_MAX_MOVE_PCT    = 0.50   # block entry if Nifty already moved 0.5%+ from today's open in trade direction
+V2_MAX_MOVE_PCT    = 0.30   # block entry if Nifty already moved 0.3%+ (~70pts) from today's open in trade direction
 V2_VOL_SURGE_MULT  = 1.5    # volume > 1.5× 20-bar avg
 V2_EMA_FAST        = 9      # fast EMA — entry filter + exit trigger
 V2_EMA_SLOW        = 20     # slow EMA — trend direction
@@ -358,9 +358,7 @@ def simulate_day(target_date: date,
     has_bnf   = (bnf is not nifty_day)
     bnf_vwap  = _vwap(bnf) if has_bnf else None
 
-    # ── Daily bias from first candle open ────────────────────────
     day_open_nifty = float(nifty_day.iloc[0]["Open"])
-    day_bias       = "CE" if day_open_nifty >= prev_close else "PE"
 
     balance     = float(INITIAL_BALANCE)
     trades      = []
@@ -534,17 +532,19 @@ def simulate_day(target_date: date,
 
             vol_surge = vol > vm * V2_VOL_SURGE_MULT
             move_pct  = (spot_cl - day_open_nifty) / day_open_nifty * 100
+            # Live bias: current Nifty vs prev close — updates every candle
+            live_bias = "CE" if spot_cl >= prev_close else "PE"
 
-            # All conditions: VWAP + dual EMA + volume + RSI + BNF + Supertrend + day bias + move exhaustion
+            # All conditions: VWAP + dual EMA + volume + RSI + BNF + Supertrend + live bias + move exhaustion
             raw_buy  = (cl > vw and cl > ef and cl > es and cl > op
                         and vol_surge and rsi > V2_RSI_MIN_CE
                         and bnf_bull and st == 1
-                        and day_bias == "CE"
+                        and live_bias == "CE"
                         and move_pct <= V2_MAX_MOVE_PCT)
             raw_sell = (cl < vw and cl < ef and cl < es and cl < op
                         and vol_surge and rsi < V2_RSI_MAX_PE
                         and bnf_bear and st == -1
-                        and day_bias == "PE"
+                        and live_bias == "PE"
                         and move_pct >= -V2_MAX_MOVE_PCT)
 
             signal = None
