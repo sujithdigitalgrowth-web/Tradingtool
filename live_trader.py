@@ -6,9 +6,14 @@ Lot size  : 65 (NSE, effective Oct 28 2025)
 import os, json, time, threading, requests
 import pandas as pd, numpy as np
 from datetime import date, datetime, timedelta, timezone
-from logzero import logger
+from logzero import logger, logfile
 from dotenv import load_dotenv
 load_dotenv()
+
+def _setup_logfile():
+    log_dir = f"logs/{_today().isoformat()}"
+    os.makedirs(log_dir, exist_ok=True)
+    logfile(f"{log_dir}/app.log", maxBytes=5_000_000, backupCount=3)
 
 # Always use IST — Railway (and most cloud hosts) run UTC
 _IST = timezone(timedelta(hours=5, minutes=30))
@@ -224,6 +229,7 @@ class AngelTrader:
         self._scrip     = _load_scrip()
         self.connected  = True
         self.last_error = None
+        _setup_logfile()
         logger.info("AngelTrader: login OK")
 
     def _ensure_session(self):
@@ -1018,6 +1024,7 @@ class AngelTrader:
             self.win_count   = 0
             self.trade_count = 0
             self.last_signal = None
+        _setup_logfile()
         logger.info("Daily state reset")
 
     def _save_state(self):
