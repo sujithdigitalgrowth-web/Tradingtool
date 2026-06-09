@@ -39,7 +39,7 @@ DAILY_PROFIT_TARGET  = 6000
 # ── V2 Strategy constants ─────────────────────────────────────────
 V2_TP_OPTION_PCT   = 0.20   # 2-lot: remaining lot hard TP at +20%
 V2_SL_OPTION_PCT   = 0.20   # premium hard stop — immediate exit, no confirmation needed
-V2_SL_WARN_PCT     = 0.13   # premium warning zone — 2 polls needed (slow bleed filter)
+V2_SL_WARN_PCT     = 0.17   # premium warning zone — 2 polls needed (slow bleed filter)
 V2_SPOT_SL_WARN    = 50     # spot warning zone — 2 polls needed (small move, wait and see)
 V2_SPOT_SL_HARD    = 80     # spot hard stop — immediate exit (market genuinely reversed)
 V2_PARTIAL_PCT     = 0.10   # 2-lot: partial exit 1 lot at +10%

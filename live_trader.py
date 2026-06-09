@@ -588,9 +588,12 @@ class AngelTrader:
     # ── Exit (full or partial) ────────────────────────────────────
 
     def _exit(self, reason, ltp=None):
-        pos = self.position
-        if not pos["active"]:
-            return
+        with self._lock:
+            if not self.position["active"]:
+                return
+            self.position["active"] = False  # claim the exit — prevents duplicate from other thread
+        pos = dict(self.position)
+        pos["active"] = True  # keep local copy consistent for pnl calc below
 
         if ltp is None:
             ltp = self.get_option_ltp(pos["symbol"], pos["token"]) or pos["entry_price"]
