@@ -7,6 +7,8 @@ import os, json, time, threading, requests
 import pandas as pd, numpy as np
 from datetime import date, datetime, timedelta, timezone
 from logzero import logger
+from dotenv import load_dotenv
+load_dotenv()
 
 # Always use IST — Railway (and most cloud hosts) run UTC
 _IST = timezone(timedelta(hours=5, minutes=30))
@@ -927,6 +929,11 @@ class AngelTrader:
 
         self._save_state()
         logger.info(f"Trading started: {lots} lot(s), max {max_trades} trades/day")
+        tag = "[PAPER] " if paper_mode else ""
+        _tg(f"🚀 <b>{tag}Bot Started</b>\n"
+            f"Lots   : {lots}\n"
+            f"Max    : {max_trades} trades/day\n"
+            f"Time   : {_now().strftime('%H:%M:%S IST')}")
 
     def stop(self):
         """Stop new entries. Keep monitoring if position is open."""
