@@ -242,7 +242,7 @@ class AngelTrader:
             rms = self._obj.rmsLimit()
             if rms and rms.get("status"):
                 d = rms["data"]
-                self.balance = round(float(d.get("availablecash", 0)), 2)
+                self.balance = round(float(d.get("net", 0)), 2)
                 return {
                     "available_cash": self.balance,
                     "used_margin"   : round(float(d.get("utiliseddebits", 0)), 2),
