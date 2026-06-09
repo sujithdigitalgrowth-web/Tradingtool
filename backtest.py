@@ -40,6 +40,7 @@ DAILY_PROFIT_TARGET  = 6000
 V2_TP_OPTION_PCT   = 0.20   # 2-lot: remaining lot hard TP at +20%
 V2_SL_OPTION_PCT   = 0.20   # premium hard stop — immediate exit, no confirmation needed
 V2_SL_WARN_PCT     = 0.17   # premium warning zone — 2 polls needed (slow bleed filter)
+V2_SIGNAL_EXIT_LOSS = 0.05  # A+B exit: min loss before counter-signal/VWAP-flip triggers
 V2_SPOT_SL_WARN    = 50     # spot warning zone — 2 polls needed (small move, wait and see)
 V2_SPOT_SL_HARD    = 80     # spot hard stop — immediate exit (market genuinely reversed)
 V2_PARTIAL_PCT     = 0.10   # 2-lot: partial exit 1 lot at +10%
@@ -126,15 +127,25 @@ def fetch_range_data_angel(start: date, end: date):
     from angel_data import fetch_all as _angel_fetch_all
     df_5m, df_1d, df_nbees, df_bnf = _angel_fetch_all(start, end)
 
-    # VIX — Yahoo Finance daily (no 58-day limit on 1d data)
+    # VIX — NSE public API (live value, applied to all days in range)
     df_vix = pd.DataFrame()
     try:
-        import yfinance as yf
-        vix_t  = yf.Ticker("^INDIAVIX")
-        fetch_end = end + timedelta(days=2)
-        df_vix = vix_t.history(start=start - timedelta(days=10), end=fetch_end, interval="1d")
-        if not df_vix.empty and df_vix.index.tz is not None:
-            df_vix.index = df_vix.index.tz_convert("Asia/Kolkata")
+        import requests as _req, pytz
+        _sess = _req.Session()
+        _sess.get("https://www.nseindia.com",
+                  headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json",
+                           "Referer": "https://www.nseindia.com"}, timeout=5)
+        _resp = _sess.get("https://www.nseindia.com/api/allIndices",
+                          headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json",
+                                   "Referer": "https://www.nseindia.com"}, timeout=5)
+        _data = _resp.json().get("data", [])
+        _vix  = next((x["last"] for x in _data if "VIX" in x.get("indexSymbol", "")), None)
+        if _vix is not None:
+            _ist  = pytz.timezone("Asia/Kolkata")
+            _days = pd.date_range(start=start - timedelta(days=10),
+                                  end=end + timedelta(days=2), freq="B")
+            _idx  = pd.DatetimeIndex([d.tz_localize(_ist) for d in _days])
+            df_vix = pd.DataFrame({"Close": [float(_vix)] * len(_idx)}, index=_idx)
     except Exception:
         pass
 
@@ -304,7 +315,8 @@ def simulate_day(target_date: date,
                  df_nbees:   pd.DataFrame = None,
                  df_bnf:     pd.DataFrame = None,
                  df_vix:     pd.DataFrame = None,
-                 entry_mode: str = "v2"):
+                 entry_mode: str = "v2",
+                 signal_aware_exit: bool = False):
     """
     Simulate V2 strategy for one trading day.
     All 11 improvements active: dual EMA, RSI, partial exit,
@@ -419,6 +431,19 @@ def simulate_day(target_date: date,
                 position["active"] = False
             break
 
+        # ── Compute raw signal for this candle (used by both exit + entry) ──
+        vol_surge = vol > vm * (1.1 if entry_mode == "v14" else V2_VOL_SURGE_MULT)
+        if entry_mode == "v14":
+            raw_buy  = cl > vw and cl > es and cl > op and vol_surge
+            raw_sell = cl < vw and cl < es and cl < op and vol_surge
+        else:
+            raw_buy  = (cl > vw and cl > ef and cl > es and cl > op
+                        and vol_surge and rsi > V2_RSI_MIN_CE
+                        and bnf_bull and st == 1)
+            raw_sell = (cl < vw and cl < ef and cl < es and cl < op
+                        and vol_surge and rsi < V2_RSI_MAX_PE
+                        and bnf_bear and st == -1)
+
         # ── Manage open position ──────────────────────────────────
         if position["active"]:
             sc      = spot_cl - position["entry_spot"]
@@ -477,11 +502,23 @@ def simulate_day(target_date: date,
                            ((position["type"] == "CE" and cl < op) or
                             (position["type"] == "PE" and cl > op)))
 
+            # A: counter-signal exit — opposite signal fired AND already losing
+            signal_flip = ((position["type"] == "CE" and raw_sell) or
+                           (position["type"] == "PE" and raw_buy))
+            # B: VWAP flip exit — price crossed back through VWAP AND already losing
+            vwap_flip   = ((position["type"] == "CE" and cl < vw) or
+                           (position["type"] == "PE" and cl > vw))
+            ab_exit = (signal_aware_exit
+                       and opt_pct <= -V2_SIGNAL_EXIT_LOSS
+                       and (signal_flip or vwap_flip))
+
             exit_reason = None
             if hard_action in ("SL", "TARGET"):
                 exit_reason = hard_action
             elif trail_exit:
                 exit_reason = "TRAIL_EXIT"
+            elif ab_exit:
+                exit_reason = "SIGNAL_EXIT"
             elif ema_exit:
                 exit_reason = "EMA_EXIT"
             elif rev_exit:
@@ -528,21 +565,7 @@ def simulate_day(target_date: date,
                 and daily_pnl < DAILY_PROFIT_TARGET
                 and vm > 0):
 
-            if entry_mode == "v14":
-                # V14: simpler entry — VWAP + EMA20 + green/red candle + volume 1.1x
-                # Removes EMA9, RSI, BankNifty, Supertrend — enters earlier in a move
-                vol_surge = vol > vm * 1.1
-                raw_buy  = cl > vw and cl > es and cl > op and vol_surge
-                raw_sell = cl < vw and cl < es and cl < op and vol_surge
-            else:
-                # V2: full conditions — VWAP + dual EMA + volume + RSI + BNF + Supertrend
-                vol_surge = vol > vm * V2_VOL_SURGE_MULT
-                raw_buy  = (cl > vw and cl > ef and cl > es and cl > op
-                            and vol_surge and rsi > V2_RSI_MIN_CE
-                            and bnf_bull and st == 1)
-                raw_sell = (cl < vw and cl < ef and cl < es and cl < op
-                            and vol_surge and rsi < V2_RSI_MAX_PE
-                            and bnf_bear and st == -1)
+            # raw_buy / raw_sell already computed above for this candle
 
             signal = None
             if raw_buy  and last_signal != "buy":

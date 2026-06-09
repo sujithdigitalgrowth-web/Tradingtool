@@ -313,14 +313,23 @@ class AngelTrader:
             for col in ["Open", "High", "Low", "Close"]:
                 df_nifty_1d[col] = (df_nifty_1d[col] * NIFTY_MULTIPLIER).round(2)
 
-        # VIX from Yahoo Finance (daily only)
+        # VIX from NSE public API (live current value)
         df_vix = pd.DataFrame()
         try:
-            import yfinance as yf
-            vix = yf.Ticker("^INDIAVIX")
-            df_vix = vix.history(start=lookback, end=today + timedelta(days=1), interval="1d")
-            if not df_vix.empty and df_vix.index.tz is not None:
-                df_vix.index = df_vix.index.tz_convert("Asia/Kolkata")
+            _sess = requests.Session()
+            _sess.get("https://www.nseindia.com",
+                      headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json",
+                                "Referer": "https://www.nseindia.com"}, timeout=5)
+            _resp = _sess.get("https://www.nseindia.com/api/allIndices",
+                              headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json",
+                                       "Referer": "https://www.nseindia.com"}, timeout=5)
+            _data = _resp.json().get("data", [])
+            _vix  = next((x["last"] for x in _data if "VIX" in x.get("indexSymbol", "")), None)
+            if _vix is not None:
+                import pytz
+                _ist = pytz.timezone("Asia/Kolkata")
+                _idx = pd.DatetimeIndex([pd.Timestamp(today).tz_localize(_ist)])
+                df_vix = pd.DataFrame({"Close": [float(_vix)]}, index=_idx)
         except Exception:
             pass
 
