@@ -8,7 +8,7 @@ Improvements (v2.1):
   2. RSI(14) filter — >60 for CE, <40 for PE
   3. Partial exit — 50% qty exits at +20%, rest runs to +40% TP
   4. Trail stop floor raised to +5% (not breakeven)
-  5. Skip Thursday (weekly expiry — high theta decay)
+  5. Skip Tuesday afternoon (weekly expiry — high theta decay)
   6. Bank Nifty alignment — BANKBEES VWAP must agree with direction
   7. Trail activates at +10%, floor at +5% after partial exit
 
@@ -58,7 +58,7 @@ V2_ATR_PERIOD      = 14
 V2_REV_ATR_MULT    = 2.0
 V2_NO_ENTRY_BEFORE = "09:30"   # start earlier — catch opening momentum
 V2_MAX_TRADES      = 2         # allow 2 trades per day (morning + afternoon)
-V2_SKIP_THURSDAY   = False     # trade Thursday morning only (afternoon blocked separately)
+V2_EXPIRY_WEEKDAY  = 1         # Tuesday = Nifty weekly expiry (morning only, afternoon blocked)
 V2_VIX_MIN         = 15        # India VIX lower bound — below 15 premiums too thin to buy
 V2_VIX_MAX         = 30        # raised from 22 — VIX 22-30 still tradeable with good premiums
 V2_MORNING_END     = "12:00"   # extended morning window
@@ -316,15 +316,18 @@ def simulate_day(target_date: date,
                  df_bnf:     pd.DataFrame = None,
                  df_vix:     pd.DataFrame = None,
                  entry_mode: str = "v2",
-                 signal_aware_exit: bool = False):
+                 signal_aware_exit: bool = False,
+                 rsi_floor_pe: float = 0,
+                 rsi_ceil_ce: float = 100,
+                 max_from_open_pct: float = 0):
     """
     Simulate V2 strategy for one trading day.
     All 11 improvements active: dual EMA, RSI, partial exit,
-    trail floor, Thursday skip, BNF alignment, trail trigger,
+    trail floor, Tuesday expiry skip, BNF alignment, trail trigger,
     India VIX filter, time window, Supertrend, 2m signals.
     """
-    # ── Thursday: morning only (no afternoon — too much theta decay) ─
-    is_thursday = target_date.weekday() == 3
+    # ── Expiry day (Tuesday): morning only — afternoon theta too high ─
+    is_thursday = target_date.weekday() == V2_EXPIRY_WEEKDAY
 
     # ── India VIX filter ─────────────────────────────────────────
     if df_vix is not None and not df_vix.empty:
@@ -356,6 +359,7 @@ def simulate_day(target_date: date,
 
     sday  = _align_etf(df_nbees)
     bnf   = _align_etf(df_bnf)   # Bank Nifty ETF for alignment
+    day_open_s = float(sday.iloc[0]["Open"]) if not sday.empty else 0.0
 
     # ── Indicators (NIFTYBEES scale) ─────────────────────────────
     vwap_s    = _vwap(sday)
@@ -438,10 +442,10 @@ def simulate_day(target_date: date,
             raw_sell = cl < vw and cl < es and cl < op and vol_surge
         else:
             raw_buy  = (cl > vw and cl > ef and cl > es and cl > op
-                        and vol_surge and rsi > V2_RSI_MIN_CE
+                        and vol_surge and rsi > V2_RSI_MIN_CE and rsi <= rsi_ceil_ce
                         and bnf_bull and st == 1)
             raw_sell = (cl < vw and cl < ef and cl < es and cl < op
-                        and vol_surge and rsi < V2_RSI_MAX_PE
+                        and vol_surge and rsi < V2_RSI_MAX_PE and rsi >= rsi_floor_pe
                         and bnf_bear and st == -1)
 
         # ── Manage open position ──────────────────────────────────
@@ -566,6 +570,17 @@ def simulate_day(target_date: date,
                 and vm > 0):
 
             # raw_buy / raw_sell already computed above for this candle
+
+            # "Move already done" filter: skip if price has already traveled
+            # more than max_from_open_pct% from the day open in the signal direction.
+            # Prevents late entries after the bulk of the move has happened.
+            if max_from_open_pct > 0 and day_open_s > 0:
+                move_ce = (cl - day_open_s) / day_open_s * 100   # how far up from open
+                move_pe = (day_open_s - cl) / day_open_s * 100   # how far down from open
+                if raw_buy  and move_ce > max_from_open_pct:
+                    raw_buy  = False
+                if raw_sell and move_pe > max_from_open_pct:
+                    raw_sell = False
 
             signal = None
             if raw_buy  and last_signal != "buy":
