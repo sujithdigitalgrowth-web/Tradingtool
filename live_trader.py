@@ -543,6 +543,20 @@ class AngelTrader:
             logger.error(self.last_error)
             return False
 
+        # Balance check — required capital = full premium (options buying, no margin)
+        required = round(entry_ltp * qty, 2)
+        if not self.paper_mode and self.balance > 0 and required > self.balance:
+            msg = (f"Insufficient balance: need ₹{required:,.0f}, "
+                   f"available ₹{self.balance:,.0f} — skipping {symbol}")
+            logger.warning(msg)
+            self.last_error = msg
+            _tg(f"⚠️ <b>Trade Skipped — Low Balance</b>\n"
+                f"Need   : ₹{required:,.0f}\n"
+                f"Available: ₹{self.balance:,.0f}\n"
+                f"Symbol : {symbol}\n"
+                f"Time   : {_now().strftime('%H:%M:%S')}")
+            return False
+
         if self.paper_mode:
             order_id = "PAPER"
         else:
