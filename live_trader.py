@@ -430,6 +430,16 @@ class AngelTrader:
         raw_sell = (cl < vw and cl < ef and cl < es and cl < op
                     and vol_surge and rsi < bt.V2_RSI_MAX_PE and bnf_bear and st == -1)
 
+        # Move-from-open filter: skip if the bulk of the move already happened
+        day_open_s = float(sday.iloc[0]["Open"]) if not sday.empty else 0.0
+        if day_open_s > 0 and bt.V2_MAX_FROM_OPEN_PCT > 0:
+            if raw_buy  and (cl - day_open_s) / day_open_s * 100 > bt.V2_MAX_FROM_OPEN_PCT:
+                self.sig_info["filter_reason"] = f"Move filter: already up {(cl-day_open_s)/day_open_s*100:.2f}% from open"
+                raw_buy = False
+            if raw_sell and (day_open_s - cl) / day_open_s * 100 > bt.V2_MAX_FROM_OPEN_PCT:
+                self.sig_info["filter_reason"] = f"Move filter: already down {(day_open_s-cl)/day_open_s*100:.2f}% from open"
+                raw_sell = False
+
         # Build human-readable reason for dashboard when no signal fires
         if not raw_buy and not raw_sell:
             reasons = []

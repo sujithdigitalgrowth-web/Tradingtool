@@ -65,6 +65,7 @@ V2_MORNING_END     = "12:00"   # extended morning window
 V2_AFTERNOON_START = "13:30"   # earlier afternoon start
 V2_ST_PERIOD       = 7         # Supertrend ATR period
 V2_ST_MULT         = 2.0       # Supertrend ATR multiplier
+V2_MAX_FROM_OPEN_PCT = 0.5     # skip entry if price already moved >0.5% from day open
 # ─────────────────────────────────────────────────────────────────
 
 
