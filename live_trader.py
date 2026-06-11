@@ -3,7 +3,8 @@ live_trader.py — Angel One Smart API live trading engine
 Strategy : V2 (VWAP + EMA9/20 + RSI + Volume + BNF + Supertrend + VIX)
 Lot size  : 65 (NSE, effective Oct 28 2025)
 """
-import os, json, time, threading, requests
+import os, json, time, threading, requests, struct, ssl
+import websocket
 import pandas as pd, numpy as np
 from datetime import date, datetime, timedelta, timezone
 from logzero import logger, logfile
@@ -76,6 +77,104 @@ def _append_trade_log(record: dict):
 SQUAREOFF_TIME  = "15:15"
 MARKET_OPEN     = "09:15"
 MARKET_CLOSE    = "15:30"
+
+# ── WebSocket real-time feed ──────────────────────────────────────
+_WS_V2_URL       = "wss://smartapisocket.angelone.in/smart-stream"
+_TICK_STALE_SECS = 10   # treat tick as stale if older than this; fall back to REST
+
+
+def _parse_tick(data: bytes):
+    """Parse SmartWebSocketV2 LTP-mode binary frame (51 bytes).
+
+    Layout: mode(1) exchange(1) token(25) seq(8) ts(8) ltp_paise(8)
+    Returns (token_str, ltp_float) or (None, None).
+    """
+    if not isinstance(data, (bytes, bytearray)) or len(data) < 51:
+        return None, None
+    try:
+        token = data[2:27].rstrip(b'\x00').decode('ascii', errors='ignore').strip()
+        ltp   = struct.unpack_from('<q', data, 43)[0] / 100.0
+        return (token, ltp) if (token and ltp > 0) else (None, None)
+    except Exception:
+        return None, None
+
+
+class _TickFeed:
+    """Real-time LTP feed via Angel One SmartWebSocketV2.
+
+    Connects in a daemon thread, subscribes a list of NFO tokens, and calls
+    on_tick(token, ltp) for every incoming tick. Auto-reconnects on drop.
+    """
+
+    def __init__(self, jwt_token: str, client_code: str, feed_token: str, on_tick):
+        self._jwt     = jwt_token
+        self._code    = client_code
+        self._feed    = feed_token
+        self._on_tick = on_tick
+        self._tokens  = []
+        self._ws_app  = None
+        self._active  = False
+
+    def subscribe(self, nfo_tokens: list):
+        self._tokens = [str(t) for t in nfo_tokens]
+
+    def _sub_msg(self):
+        return json.dumps({
+            "action": 1,
+            "params": {
+                "mode": 1,
+                "tokenList": [{"exchangeType": 2, "tokens": self._tokens}],
+            },
+        })
+
+    def connect(self):
+        """Blocking — run this in a daemon thread."""
+        headers = {
+            "Authorization": self._jwt,
+            "x-api-version": "3",
+            "x-client-code": self._code,
+            "x-feed-token": self._feed,
+        }
+        self._active = True
+
+        def _on_open(ws):
+            ws.send(self._sub_msg())
+            logger.info(f"TickFeed: subscribed NFO tokens {self._tokens}")
+
+        def _on_message(ws, message):
+            if isinstance(message, (bytes, bytearray)):
+                token, ltp = _parse_tick(message)
+                if token and ltp:
+                    self._on_tick(token, ltp)
+
+        def _on_error(ws, error):
+            logger.warning(f"TickFeed error: {error}")
+
+        def _on_close(ws, code, msg):
+            logger.info(f"TickFeed closed (code={code})")
+
+        self._ws_app = websocket.WebSocketApp(
+            _WS_V2_URL,
+            header=headers,
+            on_open=_on_open,
+            on_message=_on_message,
+            on_error=_on_error,
+            on_close=_on_close,
+        )
+        self._ws_app.run_forever(
+            sslopt={"cert_reqs": ssl.CERT_NONE},
+            ping_interval=25,
+            ping_timeout=10,
+        )
+
+    def stop(self):
+        self._active = False
+        if self._ws_app:
+            try:
+                self._ws_app.close()
+            except Exception:
+                pass
+
 
 # ── Scrip master helpers ──────────────────────────────────────────
 
@@ -161,6 +260,7 @@ class AngelTrader:
         self._lock       = threading.Lock()
         self._obj        = None
         self._auth       = None
+        self._feed_token = None
         self._api_key    = None
         self._last_login = None
         self._scrip      = []
@@ -170,6 +270,11 @@ class AngelTrader:
         self._monitoring_only = False   # stop new entries, keep monitoring
         self._sig_thread      = None
         self._mon_thread      = None
+
+        # Real-time tick feed
+        self._tick_ltp  = {}   # token -> (ltp, monotonic_time)
+        self._ws_feed   = None
+        self._ws_thread = None
 
         # Config (set by start())
         self.max_trades   = 2
@@ -202,7 +307,7 @@ class AngelTrader:
     def login(self):
         from login import login as _do_login
         try:
-            obj, auth, _, _ = _do_login()
+            obj, auth, feed_token, _ = _do_login()
         except EnvironmentError as e:
             # Missing env vars — very actionable, send specific message
             self.connected  = False
@@ -222,9 +327,10 @@ class AngelTrader:
                 f"Causes : Wrong credentials | Railway IP blocked |\n"
                 f"         Angel One API down | Clock drift on Railway")
             raise
-        self._obj       = obj
-        self._auth      = auth
-        self._api_key   = os.getenv("ANGEL_API_KEY", "")
+        self._obj        = obj
+        self._auth       = auth
+        self._feed_token = feed_token
+        self._api_key    = os.getenv("ANGEL_API_KEY", "")
         self._last_login = _now()
         self._scrip     = _load_scrip()
         self.connected  = True
@@ -622,6 +728,7 @@ class AngelTrader:
             f"Spot   : ₹{spot:.2f}\n"
             f"Time   : {_now().strftime('%H:%M')}")
         self._save_state()
+        self._start_ws_feed(token)
         return True
 
     # ── Exit (full or partial) ────────────────────────────────────
@@ -631,6 +738,7 @@ class AngelTrader:
             if not self.position["active"]:
                 return
             self.position["active"] = False  # claim the exit — prevents duplicate from other thread
+        self._stop_ws_feed()
         pos = dict(self.position)
         pos["active"] = True  # keep local copy consistent for pnl calc below
 
@@ -760,6 +868,44 @@ class AngelTrader:
             f"Time   : {_now().strftime('%H:%M')}")
         self._save_state()
 
+    # ── Real-time tick feed management ───────────────────────────
+
+    def _start_ws_feed(self, token: str):
+        """Start WebSocket V2 real-time feed for the open position's option token."""
+        if self.paper_mode:
+            return
+        if not (self._auth and self._feed_token):
+            logger.warning("TickFeed: missing auth/feed_token — WebSocket skipped")
+            return
+
+        self._stop_ws_feed()  # clean up any previous feed
+        self._tick_ltp.clear()
+
+        client_code = os.getenv("ANGEL_CLIENT_ID", "")
+        feed_obj = _TickFeed(self._auth, client_code, self._feed_token,
+                             lambda tok, ltp: self._tick_ltp.__setitem__(tok, (ltp, time.monotonic())))
+        feed_obj.subscribe([token])
+        self._ws_feed = feed_obj
+
+        def _run():
+            while self.position.get("active"):
+                try:
+                    feed_obj.connect()   # blocks until WebSocket closes
+                except Exception as e:
+                    logger.warning(f"TickFeed disconnected: {e}")
+                if self.position.get("active"):
+                    time.sleep(2)        # brief pause before reconnect
+            logger.info("TickFeed: position closed, stopping")
+
+        self._ws_thread = threading.Thread(target=_run, daemon=True, name="TickFeed")
+        self._ws_thread.start()
+        logger.info(f"TickFeed: started for NFO|{token}")
+
+    def _stop_ws_feed(self):
+        if self._ws_feed:
+            self._ws_feed.stop()
+            self._ws_feed = None
+
     # ── Position monitoring ───────────────────────────────────────
 
     def _manage_position(self):
@@ -772,7 +918,12 @@ class AngelTrader:
             self._exit("EOD_SQUAREOFF")
             return
 
-        ltp = self.get_option_ltp(pos["symbol"], pos["token"])
+        tok  = pos["token"]
+        tick = self._tick_ltp.get(tok)
+        if tick and (time.monotonic() - tick[1]) < _TICK_STALE_SECS:
+            ltp = tick[0]
+        else:
+            ltp = self.get_option_ltp(pos["symbol"], tok)
         if ltp is None:
             return
 
@@ -784,7 +935,9 @@ class AngelTrader:
             self.position["live_ltp"] = round(ltp, 2)
             self.position["live_pnl"] = round(pnl_pu * pos["qty"], 2)
 
-        is_one_lot = pos.get("initial_qty", pos["qty"]) == bt.LOT_SIZE
+        is_one_lot  = pos.get("initial_qty", pos["qty"]) == bt.LOT_SIZE
+        entry_time  = pos.get("entry_time", "00:00") or "00:00"
+        late_entry  = entry_time >= "14:30"
 
         # 1-lot: exit at +10% OR ₹1,100 — whichever comes first
         if is_one_lot:
@@ -793,7 +946,14 @@ class AngelTrader:
                 self._exit("TARGET", ltp)
                 return
 
-        # 2-lot: partial exit at +10%
+        # 2-lot late entry (after 14:30): full exit at +10% — no time to run to +20%
+        if (not is_one_lot
+                and late_entry
+                and opt_pct >= bt.V2_PARTIAL_PCT):
+            self._exit("TARGET_LATE", ltp)
+            return
+
+        # 2-lot normal: partial exit at +10%
         if (not is_one_lot
                 and not pos["partial_done"]
                 and opt_pct >= bt.V2_PARTIAL_PCT
@@ -944,7 +1104,7 @@ class AngelTrader:
                     self._save_state()
             except Exception as e:
                 logger.error(f"Monitor loop error: {e}", exc_info=True)
-            time.sleep(30)
+            time.sleep(5)
         logger.info("Monitor loop stopped")
 
     # ── Public API ────────────────────────────────────────────────
