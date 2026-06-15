@@ -103,7 +103,7 @@ print(f"  Difference            : Rs.{diff:+,.0f}")
 if diff > 0:
     extra_trades = trades_lunch - trades_current
     print(f"  Opening lunch adds Rs.{diff:+,.0f} over 30 days ({extra_trades} extra trades)")
-    print(f"  ✓ Recommend opening the window")
+    print(f"  [YES] Recommend opening the window")
 else:
-    print(f"  ✗ Lunch trades cost Rs.{abs(diff):,.0f} — keep the gap blocked")
+    print(f"  [NO]  Lunch trades cost Rs.{abs(diff):,.0f} -- keep the gap blocked")
 print(f"{'='*65}\n")

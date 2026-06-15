@@ -499,8 +499,14 @@ class AngelTrader:
         # Compute indicators — EMA/RSI/Supertrend run on multi-day history so
         # they arrive pre-warmed; extract today's slice for signal reads.
         # VWAP and vol MA reset each day and stay today-only.
-        vwap_s  = bt._vwap(sday)
-        vol_ma  = sday["Volume"].rolling(20, min_periods=5).mean()
+        vwap_s   = bt._vwap(sday)
+        _prev_v  = df_nbees[df_nbees.index.date < today].between_time("09:15", "15:30").tail(20)
+        if not _prev_v.empty:
+            _vbase = pd.concat([_prev_v, sday])
+            _vm    = _vbase["Volume"].rolling(20, min_periods=5).mean()
+            vol_ma = pd.Series(_vm.values[len(_prev_v):], index=sday.index)
+        else:
+            vol_ma = sday["Volume"].rolling(20, min_periods=5).mean()
         ema_f   = all_5m["Close"].ewm(span=bt.V2_EMA_FAST, adjust=False).mean().loc[sday.index]
         ema_s   = all_5m["Close"].ewm(span=bt.V2_EMA_SLOW, adjust=False).mean().loc[sday.index]
         rsi_s   = bt._rsi(all_5m["Close"], bt.V2_RSI_PERIOD).loc[sday.index]

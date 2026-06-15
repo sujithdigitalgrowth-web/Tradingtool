@@ -56,13 +56,13 @@ V2_RSI_MIN_CE      = 60     # RSI > 60 for CE entry
 V2_RSI_MAX_PE      = 40     # RSI < 40 for PE entry
 V2_ATR_PERIOD      = 14
 V2_REV_ATR_MULT    = 2.0
-V2_NO_ENTRY_BEFORE = "09:30"   # start earlier — catch opening momentum
+V2_NO_ENTRY_BEFORE = "10:15"   # skip noisy opening; warm indicators ready by 10:15
 V2_MAX_TRADES      = 2         # allow 2 trades per day (morning + afternoon)
 V2_EXPIRY_WEEKDAY  = 1         # Tuesday = Nifty weekly expiry (morning only, afternoon blocked)
 V2_VIX_MIN         = 15        # India VIX lower bound — below 15 premiums too thin to buy
 V2_VIX_MAX         = 30        # raised from 22 — VIX 22-30 still tradeable with good premiums
-V2_MORNING_END     = "12:00"   # extended morning window
-V2_AFTERNOON_START = "13:30"   # earlier afternoon start
+V2_MORNING_END     = "12:00"   # morning session end
+V2_AFTERNOON_START = "13:30"   # afternoon session start (lunch 12:00-13:30 blocked)
 V2_ST_PERIOD       = 7         # Supertrend ATR period
 V2_ST_MULT         = 2.0       # Supertrend ATR multiplier
 V2_MAX_FROM_OPEN_PCT = 0.5     # skip entry if price already moved >0.5% from day open
@@ -128,25 +128,14 @@ def fetch_range_data_angel(start: date, end: date):
     from angel_data import fetch_all as _angel_fetch_all
     df_5m, df_1d, df_nbees, df_bnf = _angel_fetch_all(start, end)
 
-    # VIX — NSE public API (live value, applied to all days in range)
+    # VIX — historical daily data from Yahoo Finance (correct per-day values)
     df_vix = pd.DataFrame()
     try:
-        import requests as _req, pytz
-        _sess = _req.Session()
-        _sess.get("https://www.nseindia.com",
-                  headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json",
-                           "Referer": "https://www.nseindia.com"}, timeout=5)
-        _resp = _sess.get("https://www.nseindia.com/api/allIndices",
-                          headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json",
-                                   "Referer": "https://www.nseindia.com"}, timeout=5)
-        _data = _resp.json().get("data", [])
-        _vix  = next((x["last"] for x in _data if "VIX" in x.get("indexSymbol", "")), None)
-        if _vix is not None:
-            _ist  = pytz.timezone("Asia/Kolkata")
-            _days = pd.date_range(start=start - timedelta(days=10),
-                                  end=end + timedelta(days=2), freq="B")
-            _idx  = pd.DatetimeIndex([d.tz_localize(_ist) for d in _days])
-            df_vix = pd.DataFrame({"Close": [float(_vix)] * len(_idx)}, index=_idx)
+        vix_t  = yf.Ticker("^INDIAVIX")
+        df_vix = vix_t.history(start=start - timedelta(days=10),
+                               end=end + timedelta(days=2), interval="1d")
+        if not df_vix.empty and df_vix.index.tz is not None:
+            df_vix.index = df_vix.index.tz_convert("Asia/Kolkata")
     except Exception:
         pass
 
@@ -345,10 +334,14 @@ def simulate_day(target_date: date,
     if len(nifty_day) < V2_EMA_SLOW + 2:
         return None
 
-    prev_rows = df_1d_all[df_1d_all.index.date < target_date]
+    prev_rows = df_1d_all[df_1d_all.index.date < target_date] if not df_1d_all.empty else pd.DataFrame()
     if prev_rows.empty:
-        return None
-    prev_close = float(prev_rows.iloc[-1]["Close"])
+        prev_5m = df_5m_all[df_5m_all.index.date < target_date]
+        if prev_5m.empty:
+            return None
+        prev_close = float(prev_5m.iloc[-1]["Close"])
+    else:
+        prev_close = float(prev_rows.iloc[-1]["Close"])
 
     # ── Signal source: NIFTYBEES (real volume) ───────────────────
     def _align_etf(df_etf):
@@ -362,14 +355,40 @@ def simulate_day(target_date: date,
     bnf   = _align_etf(df_bnf)   # Bank Nifty ETF for alignment
     day_open_s = float(sday.iloc[0]["Open"]) if not sday.empty else 0.0
 
-    # ── Indicators (NIFTYBEES scale) ─────────────────────────────
-    vwap_s    = _vwap(sday)
-    ema_fast  = sday["Close"].ewm(span=V2_EMA_FAST,  adjust=False).mean()
-    ema_slow  = sday["Close"].ewm(span=V2_EMA_SLOW,  adjust=False).mean()
-    vol_ma    = sday["Volume"].rolling(20).mean()
-    atr_s     = _atr(sday, V2_ATR_PERIOD)
-    rsi_s     = _rsi(sday["Close"], V2_RSI_PERIOD)
-    st_s      = _supertrend(sday, V2_ST_PERIOD, V2_ST_MULT)
+    # ── Indicators (NIFTYBEES scale, with prev-day warm-up) ─────
+    # VWAP and vol_ma reset each day → today-only. EMA/RSI/ST need
+    # historical data to be accurate on the first candle of the day.
+    vwap_s = _vwap(sday)
+
+    _has_nbees = (df_nbees is not None and not df_nbees.empty
+                  and isinstance(df_nbees.index, pd.DatetimeIndex)
+                  and sday is not nifty_day)
+
+    if _has_nbees:
+        _prev     = df_nbees[df_nbees.index.date < target_date].between_time("09:15", "15:30").tail(30)
+        _today_r  = df_nbees[df_nbees.index.date == target_date].between_time("09:15", "15:30")
+        _warm     = pd.concat([_prev, _today_r]) if not _prev.empty else _today_r
+        _n        = len(_prev)
+
+        def _slice(s):
+            part = s.iloc[_n: _n + len(sday)]
+            if len(part) != len(sday):
+                return s.iloc[-len(sday):].set_axis(sday.index)
+            return pd.Series(part.values, index=sday.index)
+
+        ema_fast = _slice(_warm["Close"].ewm(span=V2_EMA_FAST, adjust=False).mean())
+        ema_slow = _slice(_warm["Close"].ewm(span=V2_EMA_SLOW, adjust=False).mean())
+        rsi_s    = _slice(_rsi(_warm["Close"], V2_RSI_PERIOD))
+        st_s     = _slice(_supertrend(_warm, V2_ST_PERIOD, V2_ST_MULT))
+        vol_ma   = _slice(_warm["Volume"].rolling(20, min_periods=5).mean())
+    else:
+        ema_fast = sday["Close"].ewm(span=V2_EMA_FAST, adjust=False).mean()
+        ema_slow = sday["Close"].ewm(span=V2_EMA_SLOW, adjust=False).mean()
+        rsi_s    = _rsi(sday["Close"], V2_RSI_PERIOD)
+        st_s     = _supertrend(sday, V2_ST_PERIOD, V2_ST_MULT)
+        vol_ma   = sday["Volume"].rolling(20, min_periods=5).mean()
+
+    atr_s = _atr(sday, V2_ATR_PERIOD)
 
     # ── Bank Nifty VWAP (BANKBEES scale) ─────────────────────────
     has_bnf   = (bnf is not nifty_day)
@@ -613,10 +632,14 @@ def _no_trade_result(target_date, df_5m_all, df_1d_all, note=""):
     nifty_day = df_5m_all[df_5m_all.index.date == target_date].between_time("09:15", "15:30")
     if nifty_day.empty:
         return None
-    prev_rows = df_1d_all[df_1d_all.index.date < target_date]
+    prev_rows = df_1d_all[df_1d_all.index.date < target_date] if not df_1d_all.empty else pd.DataFrame()
     if prev_rows.empty:
-        return None
-    prev_close = float(prev_rows.iloc[-1]["Close"])
+        prev_5m = df_5m_all[df_5m_all.index.date < target_date]
+        if prev_5m.empty:
+            return None
+        prev_close = float(prev_5m.iloc[-1]["Close"])
+    else:
+        prev_close = float(prev_rows.iloc[-1]["Close"])
     result = _build_result(target_date, nifty_day, prev_close, 0.0,
                            float(INITIAL_BALANCE), [], 0)
     if note:

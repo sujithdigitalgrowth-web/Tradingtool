@@ -162,7 +162,7 @@ def fetch_all(start: date, end: date):
 
     print("  [2/4] NIFTYBEES 1d  (-> Nifty daily for prev-close)...")
     df_nbees_1d = _fetch_daily(auth_token, api_key, NIFTYBEES_TOKEN, start, end)
-    df_nifty_1d = pd.DataFrame()
+    df_nifty_1d = _to_df([], 1.0)   # ensures DatetimeIndex even when 1D fetch fails
     if not df_nbees_1d.empty:
         df_nifty_1d = df_nbees_1d.copy()
         for col in ["Open", "High", "Low", "Close"]:
