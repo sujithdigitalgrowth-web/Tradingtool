@@ -1,8 +1,6 @@
 """
-Compare V2 (current) vs V14 (simplified entry) strategy over last 58 days.
-
-V2  : VWAP + EMA9 + EMA20 + RSI + BankNifty + Supertrend + volume 1.5x
-V14 : VWAP + EMA20 + green/red candle + volume 1.1x  (no RSI/ST/BNF/EMA9)
+Compare V2 strategy performance across different lot sizes: 1, 2, 3, 5 lots.
+Also compares V2 vs V14 at the default lot size.
 """
 from datetime import date, timedelta
 import backtest as bt
@@ -18,11 +16,11 @@ try:
     print("Angel One data fetched successfully.\n")
 except Exception as e:
     print(f"Angel One fetch failed: {e}")
-    print("Trying Yahoo Finance fallback...")
     df_5m, df_1d, df_nbees, df_bnf, df_vix = bt.fetch_range_data_v2(START, END)
 
 
-def run(label, mode):
+def run(label, lots, mode="v2"):
+    bt.QTY = lots * bt.LOT_SIZE
     results = []
     current = START
     while current <= END:
@@ -34,47 +32,35 @@ def run(label, mode):
                 results.append(r)
         current += timedelta(days=1)
 
-    trading_days = len(results)
-    traded_days  = sum(1 for r in results if r["trade_count"] > 0)
     total_trades = sum(r["trade_count"] for r in results)
     total_pnl    = sum(r["daily_pnl"] for r in results)
-    win_days     = sum(1 for r in results if r["daily_pnl"] > 0)
-    loss_days    = sum(1 for r in results if r["daily_pnl"] < 0)
-    best_day     = max((r["daily_pnl"] for r in results), default=0)
     worst_day    = min((r["daily_pnl"] for r in results), default=0)
+    best_day     = max((r["daily_pnl"] for r in results), default=0)
 
     all_trades = [t for r in results for t in r.get("trades", [])]
     wins   = [t for t in all_trades if t.get("pnl", 0) > 0]
     losses = [t for t in all_trades if t.get("pnl", 0) <= 0]
     win_rate = len(wins) / len(all_trades) * 100 if all_trades else 0
-    avg_win  = sum(t["pnl"] for t in wins)   / len(wins)   if wins   else 0
-    avg_loss = sum(t["pnl"] for t in losses) / len(losses) if losses else 0
 
-    print(f"{'='*52}")
-    print(f"  {label}")
-    print(f"{'='*52}")
-    print(f"  Trading days       : {trading_days}  (traded: {traded_days})")
-    print(f"  Total trades       : {total_trades}")
-    print(f"  Win rate           : {win_rate:.1f}%  ({len(wins)}W / {len(losses)}L)")
-    print(f"  Total P&L          : Rs.{total_pnl:+,.2f}")
-    print(f"  Win days/Loss days : {win_days} / {loss_days}")
-    print(f"  Best day           : Rs.{best_day:+,.2f}")
-    print(f"  Worst day          : Rs.{worst_day:+,.2f}")
-    print(f"  Avg win/trade      : Rs.{avg_win:+,.2f}")
-    print(f"  Avg loss/trade     : Rs.{avg_loss:+,.2f}")
-    print()
-    return total_pnl, total_trades, win_rate
+    # Estimate capital needed (avg option price × lot size × lots)
+    capitals = [t.get("capital", 0) for t in all_trades if t.get("capital", 0) > 0]
+    avg_capital = sum(capitals) / len(capitals) if capitals else 0
+
+    print(f"  {label:<42} | Trades:{total_trades:3d} | WR:{win_rate:5.1f}% | "
+          f"P&L: Rs.{total_pnl:>+10,.0f} | Best: Rs.{best_day:>+8,.0f} | "
+          f"Worst: Rs.{worst_day:>+8,.0f} | Avg Capital: Rs.{avg_capital:>7,.0f}")
+    return total_pnl, win_rate
 
 
-pnl_v2,  trades_v2,  wr_v2  = run("V2  — Current  (VWAP+EMA9+EMA20+RSI+BNF+ST, vol 1.5x)", "v2")
-pnl_v14, trades_v14, wr_v14 = run("V14 — Simplified (VWAP+EMA20+candle, vol 1.1x)", "v14")
+print(f"\n{'='*130}")
+print(f"  {'STRATEGY':<42} | {'Trades':>6} | {'WR':>6} | {'Total P&L':>14} | {'Best Day':>12} | {'Worst Day':>12} | {'Avg Capital':>14}")
+print(f"{'='*130}")
 
-print(f"{'='*52}")
-print(f"  COMPARISON SUMMARY")
-print(f"{'='*52}")
-print(f"  P&L    : Rs.{pnl_v2:+,.2f}  →  Rs.{pnl_v14:+,.2f}  ({pnl_v14 - pnl_v2:+,.2f})")
-print(f"  Trades : {trades_v2}  →  {trades_v14}  ({trades_v14 - trades_v2:+d})")
-print(f"  Win %  : {wr_v2:.1f}%  →  {wr_v14:.1f}%  ({wr_v14 - wr_v2:+.1f}%)")
-verdict = "BETTER" if pnl_v14 > pnl_v2 else "WORSE"
-print(f"\n  VERDICT: V14 is {verdict} than V2")
-print(f"{'='*52}\n")
+run("V2 — 1 lot  (65 qty)",  1)
+run("V2 — 2 lots (130 qty)", 2)
+run("V2 — 3 lots (195 qty)", 3)
+run("V2 — 5 lots (325 qty)", 5)
+
+print(f"{'='*130}")
+print(f"\n  NOTE: Win rate stays the same across lots — only P&L and risk scale.")
+print(f"  Capital required scales with lot size. Risk (worst day) also scales.\n")
