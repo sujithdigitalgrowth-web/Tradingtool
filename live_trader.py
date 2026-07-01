@@ -408,8 +408,10 @@ class AngelTrader:
 
         df_nbees = _fetch_intraday(self._auth, self._api_key,
                                    NIFTYBEES_TOKEN, lookback, today)
+        time.sleep(1)   # space out Angel One historical-API calls — avoid rate-limit throttling
         df_bnf   = _fetch_intraday(self._auth, self._api_key,
                                    BANKBEES_TOKEN, lookback, today)
+        time.sleep(1)
         df_1d    = _fetch_daily(self._auth, self._api_key,
                                 NIFTYBEES_TOKEN, lookback, today)
 

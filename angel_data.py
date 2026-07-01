@@ -65,6 +65,7 @@ def _fetch_chunk(auth_token: str, api_key: str, token: str, exchange: str,
     }
     hdrs = _headers(auth_token, api_key)
     for attempt in range(retries):
+        resp = None
         try:
             resp = requests.post(API_URL, headers=hdrs, json=body, timeout=15)
             data = resp.json()
@@ -72,7 +73,8 @@ def _fetch_chunk(auth_token: str, api_key: str, token: str, exchange: str,
                 return data["data"]
             logger.debug(f"Empty response token={token} attempt={attempt+1}: {data.get('message','')}")
         except Exception as e:
-            logger.warning(f"Fetch error token={token} attempt={attempt+1}: {e}")
+            status = resp.status_code if resp is not None else "?"
+            logger.warning(f"Fetch error token={token} attempt={attempt+1} status={status}: {e}")
         if attempt < retries - 1:
             _time.sleep(2)
     return []
