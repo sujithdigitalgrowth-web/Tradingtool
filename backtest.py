@@ -59,7 +59,7 @@ V2_REV_ATR_MULT    = 2.0
 V2_NO_ENTRY_BEFORE = "10:15"   # skip noisy opening; warm indicators ready by 10:15
 V2_MAX_TRADES      = 2         # allow 2 trades per day (morning + afternoon)
 V2_EXPIRY_WEEKDAY  = 1         # Tuesday = Nifty weekly expiry (morning only, afternoon blocked)
-V2_VIX_MIN         = 15        # India VIX lower bound — below 15 premiums too thin to buy
+V2_VIX_MIN         = 13        # India VIX lower bound — below 13 premiums too thin to buy
 V2_VIX_MAX         = 30        # raised from 22 — VIX 22-30 still tradeable with good premiums
 V2_MORNING_END     = "12:00"   # morning session end
 V2_AFTERNOON_START = "13:30"   # afternoon session start (lunch 12:00-13:30 blocked)
