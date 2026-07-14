@@ -276,6 +276,11 @@ class AngelTrader:
         self._ws_feed   = None
         self._ws_thread = None
 
+        # Underlying EMA9 reference — kept fresh even while a position is
+        # open, so _manage_position can check EMA_EXIT (backtest.py's
+        # dominant exit mechanism, ported here to match validated results).
+        self._ema_ref = {"close": None, "ema9": None}
+
         # Config (set by start())
         self.max_trades   = 2
         self.lots         = 1
@@ -445,12 +450,33 @@ class AngelTrader:
 
     # ── Signal detection (mirrors backtest V2 logic exactly) ─────
 
+    def _update_ema_ref(self, df_nbees):
+        """
+        Refresh the cached underlying (NIFTYBEES) close + EMA9, used by
+        _manage_position's EMA_EXIT check. Called from _check_signal (when no
+        position is open) and directly from _signal_loop (when a position IS
+        open, since _check_signal itself is skipped in that case).
+        """
+        try:
+            if df_nbees is None or df_nbees.empty or not isinstance(df_nbees.index, pd.DatetimeIndex):
+                return
+            today  = _today()
+            all_5m = df_nbees[df_nbees.index.date <= today].between_time("09:15", "15:30")
+            sday   = all_5m[all_5m.index.date == today]
+            if sday.empty:
+                return
+            ema_f = all_5m["Close"].ewm(span=bt.V2_EMA_FAST, adjust=False).mean().loc[sday.index]
+            self._ema_ref = {"close": float(sday.iloc[-1]["Close"]), "ema9": float(ema_f.iloc[-1])}
+        except Exception as e:
+            logger.warning(f"EMA ref update failed: {e}")
+
     def _check_signal(self, df_nbees, df_1d, df_bnf, df_vix):
         """
         Run V2 indicator logic on latest closed 5m candle.
         Returns ("BUY_CE" | "BUY_PE" | None, vix_value | None)
         Also updates self.sig_info["filter_reason"] with why no signal fired.
         """
+        self._update_ema_ref(df_nbees)
         today = _today()
         now   = _now()
 
@@ -530,8 +556,6 @@ class AngelTrader:
         rsi = float(rsi_s.iloc[i])  if not np.isnan(rsi_s.iloc[i])  else 50.0
         st  = int(st_s.iloc[i])
 
-        vol_surge = vm > 0 and vol > vm * bt.V2_VOL_SURGE_MULT
-
         if has_bnf and bnf_vwap is not None and len(bnf_day) > i:
             bnf_cl   = float(bnf_day.iloc[i]["Close"])
             bnf_vw   = float(bnf_vwap.iloc[i])
@@ -539,10 +563,13 @@ class AngelTrader:
         else:
             bnf_bull = bnf_bear = True
 
+        # Volume-surge requirement removed (2026-07-14 finding): it disproportionately
+        # caught capitulation/climax candles rather than genuine trend starts —
+        # validated over 30/60-day backtests to improve trade count and P&L.
         raw_buy  = (cl > vw and cl > ef and cl > es and cl > op
-                    and vol_surge and rsi > bt.V2_RSI_MIN_CE and bnf_bull and st == 1)
+                    and rsi > bt.V2_RSI_MIN_CE and bnf_bull and st == 1)
         raw_sell = (cl < vw and cl < ef and cl < es and cl < op
-                    and vol_surge and rsi < bt.V2_RSI_MAX_PE and bnf_bear and st == -1)
+                    and rsi < bt.V2_RSI_MAX_PE and bnf_bear and st == -1)
 
         # Move-from-open filter: skip if the bulk of the move already happened
         day_open_s = float(sday.iloc[0]["Open"]) if not sday.empty else 0.0
@@ -560,7 +587,6 @@ class AngelTrader:
             if not (cl > vw):      reasons.append(f"Close({cl:.2f})<VWAP({vw:.2f})")
             if not (cl > ef):      reasons.append(f"Close<EMA9({ef:.2f})")
             if not (cl > es):      reasons.append(f"Close<EMA20({es:.2f})")
-            if not vol_surge:      reasons.append(f"Vol {vol/vm:.1f}x<1.5x" if vm > 0 else "Vol N/A")
             if rsi <= bt.V2_RSI_MIN_CE and rsi >= bt.V2_RSI_MAX_PE:
                 reasons.append(f"RSI({rsi:.0f}) neutral")
             if st != 1 and st != -1:  reasons.append("ST neutral")
@@ -947,8 +973,11 @@ class AngelTrader:
         entry_time  = pos.get("entry_time", "00:00") or "00:00"
         late_entry  = entry_time >= "14:30"
 
-        # 1-lot: exit at +10% OR ₹1,100 — whichever comes first
-        if is_one_lot:
+        # 1-lot: exit at +10% OR ₹1,100 — whichever comes first (only if V2_1LOT_HARD_TP).
+        # Validated default (False): skip the hard cap and let the trailing stop
+        # below (activates @V2_TRAIL_TRIGGER, floor @breakeven) manage the exit
+        # instead — backtested to turn -Rs.34,059 into +Rs.1,046 over 138 days.
+        if is_one_lot and bt.V2_1LOT_HARD_TP:
             abs_pnl = (ltp - pos["entry_price"]) * bt.LOT_SIZE
             if opt_pct >= bt.V2_1LOT_TP_PCT or abs_pnl >= bt.V2_1LOT_TP_RUPEES:
                 self._exit("TARGET", ltp)
@@ -1028,9 +1057,18 @@ class AngelTrader:
             with self._lock:
                 self.position["sl_warn_count"] = 0
 
-        if   opt_pct >= bt.V2_TP_OPTION_PCT: self._exit("TARGET",     ltp)
-        elif sl_triggered:                    self._exit("SL",         ltp)
-        elif trail_exit:                      self._exit("TRAIL_EXIT", ltp)
+        # EMA9 exit: underlying closed back through EMA9 against the position.
+        # Ported from backtest.py — was the dominant exit mechanism behind the
+        # validated no-cap trailing result (most trades exit here, not via SL).
+        ema_exit = False
+        if self._ema_ref.get("ema9") is not None:
+            ema_exit = ((pos["side"] == "CE" and self._ema_ref["close"] < self._ema_ref["ema9"]) or
+                        (pos["side"] == "PE" and self._ema_ref["close"] > self._ema_ref["ema9"]))
+
+        if   opt_pct >= bt.V2_TP_OPTION_PCT and not is_one_lot: self._exit("TARGET",     ltp)
+        elif sl_triggered:                                       self._exit("SL",         ltp)
+        elif trail_exit:                                         self._exit("TRAIL_EXIT", ltp)
+        elif ema_exit:                                           self._exit("EMA_EXIT",   ltp)
 
     # ── Background loops ──────────────────────────────────────────
 
@@ -1086,6 +1124,15 @@ class AngelTrader:
                             self._last_error_tg = now_dt
                     else:
                         self._consec_errors = 0   # reset on success
+                elif self.position["active"]:
+                    # Position open — full signal check is skipped, but keep the
+                    # underlying's EMA9 reference fresh so _manage_position's
+                    # EMA_EXIT check has current data to compare against.
+                    try:
+                        df_nbees, _, _, _ = self._fetch_live_data()
+                        self._update_ema_ref(df_nbees)
+                    except Exception as e:
+                        logger.warning(f"EMA ref refresh (position open) failed: {e}")
 
                 self._save_state()
 

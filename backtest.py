@@ -29,7 +29,7 @@ from datetime import datetime, date, timedelta
 SYMBOL               = "^NSEI"
 INITIAL_BALANCE      = 30_000
 LOT_SIZE             = 65   # NSE lot size effective Oct 28 2025
-QTY                  = LOT_SIZE * 2   # default: 2 lots
+QTY                  = LOT_SIZE   # default: 1 lot — matches live trading_config.json ("lots": 1)
 ATM_OPTION_IV        = 0.15
 NO_ENTRY_AFTER       = "14:50"
 SQUAREOFF_TIME       = "15:15"
@@ -47,7 +47,11 @@ V2_PARTIAL_PCT     = 0.10   # 2-lot: partial exit 1 lot at +10%
 V2_TRAIL_TRIGGER   = 0.10   # activate trail at +10%
 V2_TRAIL_FLOOR     = 0.00   # after partial: SL steps to breakeven (0%)
 V2_1LOT_TP_PCT     = 0.10   # 1-lot: exit at +10% option gain …
-V2_1LOT_TP_RUPEES  = 1100   # … or ₹1,100 absolute P&L — whichever comes first
+V2_1LOT_TP_RUPEES  = 1100   # … or ₹1,100 absolute P&L — whichever comes first (only used if V2_1LOT_HARD_TP)
+V2_1LOT_HARD_TP    = False  # if False (validated default): 1-lot skips the hard cap above and
+                             # lets the trailing stop (V2_TRAIL_TRIGGER/trail_floor_1lot) manage
+                             # the exit instead — backtested Jan-Jul 2026: -Rs.34,059 -> +Rs.1,046
+                             # over 138 days by letting winners run past +10% instead of capping them.
 V2_VOL_SURGE_MULT  = 0.9    # volume > 0.9× 20-bar avg
 V2_EMA_FAST        = 9      # fast EMA — entry filter + exit trigger
 V2_EMA_SLOW        = 20     # slow EMA — trend direction
@@ -66,6 +70,11 @@ V2_AFTERNOON_START = "13:30"   # afternoon session start (lunch 12:00-13:30 bloc
 V2_ST_PERIOD       = 7         # Supertrend ATR period
 V2_ST_MULT         = 2.0       # Supertrend ATR multiplier
 V2_MAX_FROM_OPEN_PCT = 0.5     # skip entry if price already moved >0.5% from day open
+V2_DIVERGENCE_LOOKBACK = 5     # candles to look back for RSI-divergence (exhaustion) check
+
+# ── V4 scoring-gate constants (entry_mode="v4") ───────────────────
+V2_CROSS_LOOKBACK  = 3         # candles to look back for a fresh EMA9/EMA20 cross
+V2_CONFIRM_MIN     = 3         # confirmations required out of 5 (RSI, ST, volume, BNF, candle color)
 # ─────────────────────────────────────────────────────────────────
 
 
@@ -215,6 +224,73 @@ def _supertrend(df: pd.DataFrame, period: int = 7, multiplier: float = 2.0) -> p
     return pd.Series(dirn, index=df.index)
 
 
+def _fresh_cross(ema_fast_s: pd.Series, ema_slow_s: pd.Series, i: int,
+                  lookback: int, direction: str) -> bool:
+    """True if EMA9 crossed EMA20 in the given direction within `lookback` candles ending at i."""
+    lo = max(1, i - lookback + 1)
+    for j in range(lo, i + 1):
+        prev_up = ema_fast_s.iloc[j - 1] > ema_slow_s.iloc[j - 1]
+        curr_up = ema_fast_s.iloc[j] > ema_slow_s.iloc[j]
+        if direction == "up" and curr_up and not prev_up:
+            return True
+        if direction == "down" and not curr_up and prev_up:
+            return True
+    return False
+
+
+def compute_v2_signal(cl, op, vw, ef, es, vm, vol, rsi, st, bnf_bull, bnf_bear,
+                       cross_recent_ce, cross_recent_pe, entry_mode="v2") -> tuple:
+    """
+    Shared entry-signal logic used by both simulate_day() and live_trader's
+    _check_signal() — the single source of truth so backtest results stay
+    representative of live behavior.
+
+    entry_mode="v2" : legacy all-conditions-must-agree AND-gate.
+    entry_mode="v4" : mandatory (fresh EMA cross + VWAP side) + majority-vote
+                      confirmation score (RSI, Supertrend, volume, BNF, candle color).
+
+    Returns (raw_buy, raw_sell, debug: dict) — debug feeds dashboard filter_reason.
+    """
+    vol_surge = vm > 0 and vol > vm * V2_VOL_SURGE_MULT
+    debug = {}
+
+    if entry_mode != "v4":
+        raw_buy  = (cl > vw and cl > ef and cl > es and cl > op
+                    and vol_surge and rsi > V2_RSI_MIN_CE and bnf_bull and st == 1)
+        raw_sell = (cl < vw and cl < ef and cl < es and cl < op
+                    and vol_surge and rsi < V2_RSI_MAX_PE and bnf_bear and st == -1)
+        return raw_buy, raw_sell, debug
+
+    # ── v4: mandatory timing gate + confirmation score ────────────
+    confirms_ce = {
+        "rsi"    : rsi > V2_RSI_MIN_CE,
+        "st"     : st == 1,
+        "volume" : vol_surge,
+        "bnf"    : bnf_bull,
+        "candle" : cl > op,
+    }
+    confirms_pe = {
+        "rsi"    : rsi < V2_RSI_MAX_PE,
+        "st"     : st == -1,
+        "volume" : vol_surge,
+        "bnf"    : bnf_bear,
+        "candle" : cl < op,
+    }
+    score_ce = sum(confirms_ce.values())
+    score_pe = sum(confirms_pe.values())
+
+    raw_buy  = cross_recent_ce and (cl > vw) and score_ce >= V2_CONFIRM_MIN
+    raw_sell = cross_recent_pe and (cl < vw) and score_pe >= V2_CONFIRM_MIN
+
+    debug = {
+        "cross_ce": cross_recent_ce, "cross_pe": cross_recent_pe,
+        "vwap_ce": cl > vw, "vwap_pe": cl < vw,
+        "score_ce": score_ce, "score_pe": score_pe,
+        "confirms_ce": confirms_ce, "confirms_pe": confirms_pe,
+    }
+    return raw_buy, raw_sell, debug
+
+
 def _trade_record(position, exit_time, exit_spot, opt_pnl_per, reason, qty=None):
     q        = qty if qty is not None else position["qty"]
     opt_exit = round(position["entry_option_price"] + opt_pnl_per, 2)
@@ -309,7 +385,16 @@ def simulate_day(target_date: date,
                  signal_aware_exit: bool = False,
                  rsi_floor_pe: float = 0,
                  rsi_ceil_ce: float = 100,
-                 max_from_open_pct: float = 0):
+                 max_from_open_pct: float = 0,
+                 ema_exit_confirm: int = 1,
+                 ema_exit_min_loss: float = 0.0,
+                 trail_trigger: float = None,
+                 trail_floor_1lot: float = 0.0,
+                 require_vol_surge: bool = False,
+                 require_supertrend: bool = True,
+                 require_bnf: bool = True,
+                 require_candle_color: bool = True,
+                 require_no_divergence: bool = False):
     """
     Simulate V2 strategy for one trading day.
     All 11 improvements active: dual EMA, RSI, partial exit,
@@ -390,6 +475,15 @@ def simulate_day(target_date: date,
 
     atr_s = _atr(sday, V2_ATR_PERIOD)
 
+    # ── RSI divergence (exhaustion) check ─────────────────────────
+    # New price low without RSI also making a new low (or new high without
+    # RSI making a new high) means the move is losing momentum even as
+    # price extends — a standard "this move is exhausted" signal.
+    prior_low_close  = sday["Close"].rolling(V2_DIVERGENCE_LOOKBACK, min_periods=1).min().shift(1)
+    prior_low_rsi    = rsi_s.rolling(V2_DIVERGENCE_LOOKBACK, min_periods=1).min().shift(1)
+    prior_high_close = sday["Close"].rolling(V2_DIVERGENCE_LOOKBACK, min_periods=1).max().shift(1)
+    prior_high_rsi   = rsi_s.rolling(V2_DIVERGENCE_LOOKBACK, min_periods=1).max().shift(1)
+
     # ── Bank Nifty VWAP (BANKBEES scale) ─────────────────────────
     has_bnf   = (bnf is not nifty_day)
     bnf_vwap  = _vwap(bnf) if has_bnf else None
@@ -406,6 +500,7 @@ def simulate_day(target_date: date,
         "entry_time"  : None,  "qty": QTY,
         "trail_on"    : False, "partial_done": False,
         "sl_warn_count": 0,   # consecutive candle closes in SL warning zone
+        "ema_warn_count": 0,  # consecutive candle closes back through EMA9
     }
 
     nifty_candles = list(nifty_day.iterrows())
@@ -460,13 +555,36 @@ def simulate_day(target_date: date,
         if entry_mode == "v14":
             raw_buy  = cl > vw and cl > es and cl > op and vol_surge
             raw_sell = cl < vw and cl < es and cl < op and vol_surge
+        elif entry_mode == "v4":
+            cross_recent_ce = _fresh_cross(ema_fast, ema_slow, i, V2_CROSS_LOOKBACK, "up")
+            cross_recent_pe = _fresh_cross(ema_fast, ema_slow, i, V2_CROSS_LOOKBACK, "down")
+            raw_buy, raw_sell, _ = compute_v2_signal(
+                cl, op, vw, ef, es, vm, vol, rsi, st, bnf_bull, bnf_bear,
+                cross_recent_ce, cross_recent_pe, entry_mode="v4")
         else:
-            raw_buy  = (cl > vw and cl > ef and cl > es and cl > op
-                        and vol_surge and rsi > V2_RSI_MIN_CE and rsi <= rsi_ceil_ce
-                        and bnf_bull and st == 1)
-            raw_sell = (cl < vw and cl < ef and cl < es and cl < op
-                        and vol_surge and rsi < V2_RSI_MAX_PE and rsi >= rsi_floor_pe
-                        and bnf_bear and st == -1)
+            vol_ok    = (vol_surge if require_vol_surge else True)
+            st_ok_ce  = (st == 1  if require_supertrend else True)
+            st_ok_pe  = (st == -1 if require_supertrend else True)
+            bnf_ok_ce = (bnf_bull if require_bnf else True)
+            bnf_ok_pe = (bnf_bear if require_bnf else True)
+            candle_ok_ce = (cl > op if require_candle_color else True)
+            candle_ok_pe = (cl < op if require_candle_color else True)
+            raw_buy  = (cl > vw and cl > ef and cl > es and candle_ok_ce
+                        and vol_ok and rsi > V2_RSI_MIN_CE and rsi <= rsi_ceil_ce
+                        and bnf_ok_ce and st_ok_ce)
+            raw_sell = (cl < vw and cl < ef and cl < es and candle_ok_pe
+                        and vol_ok and rsi < V2_RSI_MAX_PE and rsi >= rsi_floor_pe
+                        and bnf_ok_pe and st_ok_pe)
+
+            if require_no_divergence:
+                plc, plr = prior_low_close.iloc[i], prior_low_rsi.iloc[i]
+                phc, phr = prior_high_close.iloc[i], prior_high_rsi.iloc[i]
+                # New price low but RSI didn't also make a new low -> down-move exhausted, skip PE
+                if raw_sell and not np.isnan(plc) and not np.isnan(plr) and cl < plc and rsi > plr:
+                    raw_sell = False
+                # New price high but RSI didn't also make a new high -> up-move exhausted, skip CE
+                if raw_buy and not np.isnan(phc) and not np.isnan(phr) and cl > phc and rsi < phr:
+                    raw_buy = False
 
         # ── Manage open position ──────────────────────────────────
         if position["active"]:
@@ -474,8 +592,9 @@ def simulate_day(target_date: date,
             pnl_pu  = sc * 0.5 if position["type"] == "CE" else -sc * 0.5
             opt_pct = pnl_pu / position["entry_option_price"]
 
-            # Activate trailing stop once up V2_TRAIL_TRIGGER
-            if not position["trail_on"] and opt_pct >= V2_TRAIL_TRIGGER:
+            # Activate trailing stop once up V2_TRAIL_TRIGGER (or override)
+            _trig = trail_trigger if trail_trigger is not None else V2_TRAIL_TRIGGER
+            if not position["trail_on"] and opt_pct >= _trig:
                 position["trail_on"] = True
 
             # ── Partial exit at +10% (only when holding 2+ lots) ────
@@ -496,14 +615,17 @@ def simulate_day(target_date: date,
                 position["qty"]          -= LOT_SIZE
                 position["partial_done"]  = True
 
-            # After partial, SL steps to breakeven (trail_floor = 0%)
-            trail_floor = V2_TRAIL_FLOOR if position["partial_done"] else 0.0
+            # After partial (2-lot): SL steps to V2_TRAIL_FLOOR.
+            # 1-lot never partials — floor is independently tunable via trail_floor_1lot.
+            trail_floor = V2_TRAIL_FLOOR if position["partial_done"] else trail_floor_1lot
 
             # ── TARGET condition — differs for 1-lot vs 2-lot ───────────
             is_one_lot = position["initial_qty"] == LOT_SIZE
             abs_pnl    = pnl_pu * position["qty"]
-            tp_hit = ((opt_pct >= V2_1LOT_TP_PCT or abs_pnl >= V2_1LOT_TP_RUPEES)
-                      if is_one_lot else opt_pct >= V2_TP_OPTION_PCT)
+            if is_one_lot:
+                tp_hit = V2_1LOT_HARD_TP and (opt_pct >= V2_1LOT_TP_PCT or abs_pnl >= V2_1LOT_TP_RUPEES)
+            else:
+                tp_hit = opt_pct >= V2_TP_OPTION_PCT
 
             # ── SL logic: 2-close confirmation for boundary zone ────────
             if opt_pct <= -V2_SL_OPTION_PCT:
@@ -520,8 +642,21 @@ def simulate_day(target_date: date,
                 hard_action = "TARGET" if tp_hit else "HOLD"
 
             trail_exit  = position["trail_on"] and opt_pct <= trail_floor
-            ema_exit    = ((position["type"] == "CE" and cl < ef) or
+
+            # EMA9 exit: require `ema_exit_confirm` consecutive candle closes
+            # back through EMA9, AND (if ema_exit_min_loss > 0) the trade must
+            # already be down at least that much before it counts as an exit.
+            # Default (1, 0.0) = legacy: fires instantly on a single noisy
+            # candle regardless of P&L — was the dominant historical loss driver.
+            ema_breach  = ((position["type"] == "CE" and cl < ef) or
                            (position["type"] == "PE" and cl > ef))
+            if ema_breach:
+                position["ema_warn_count"] = position.get("ema_warn_count", 0) + 1
+            else:
+                position["ema_warn_count"] = 0
+            ema_confirmed = position["ema_warn_count"] >= ema_exit_confirm
+            ema_exit    = (ema_confirmed and opt_pct <= -ema_exit_min_loss
+                           if ema_exit_min_loss > 0 else ema_confirmed)
             rev_exit    = (at > 0 and (hi - lo) > at * V2_REV_ATR_MULT and
                            ((position["type"] == "CE" and cl < op) or
                             (position["type"] == "PE" and cl > op)))
@@ -620,6 +755,7 @@ def simulate_day(target_date: date,
                         "initial_qty"       : QTY,   # locked at entry, never changes
                         "trail_on"          : False, "partial_done": False,
                         "sl_warn_count"     : 0,
+                        "ema_warn_count"    : 0,
                     })
 
     result = _build_result(target_date, nifty_day, prev_close, daily_pnl,
