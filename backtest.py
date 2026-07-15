@@ -71,6 +71,8 @@ V2_ST_PERIOD       = 7         # Supertrend ATR period
 V2_ST_MULT         = 2.0       # Supertrend ATR multiplier
 V2_MAX_FROM_OPEN_PCT = 0.5     # skip entry if price already moved >0.5% from day open
 V2_DIVERGENCE_LOOKBACK = 5     # candles to look back for RSI-divergence (exhaustion) check
+V2_PULLBACK_LOOKBACK = 6       # candles to look back for a pullback-to-EMA9 touch
+V2_PULLBACK_TOL_PCT = 0.001    # 0.1% tolerance band around EMA9 counted as a "touch"
 
 # ── V4 scoring-gate constants (entry_mode="v4") ───────────────────
 V2_CROSS_LOOKBACK  = 3         # candles to look back for a fresh EMA9/EMA20 cross
@@ -238,6 +240,25 @@ def _fresh_cross(ema_fast_s: pd.Series, ema_slow_s: pd.Series, i: int,
     return False
 
 
+def _recent_pullback(low_s: pd.Series, high_s: pd.Series, ema_fast_s: pd.Series,
+                      i: int, lookback: int, tol_pct: float, direction: str) -> bool:
+    """
+    True if price touched within tol_pct of EMA9 (a pullback/retest) at some
+    point in the `lookback` candles strictly before i — i.e. the current
+    breakout candle is a bounce off a retest, not the very first candle to
+    ever clear EMA9. Simplified proxy for a full pullback-then-confirm entry.
+    """
+    lo = max(0, i - lookback)
+    for j in range(lo, i):
+        ema = ema_fast_s.iloc[j]
+        tol = ema * tol_pct
+        if direction == "up" and low_s.iloc[j] <= ema + tol:
+            return True
+        if direction == "down" and high_s.iloc[j] >= ema - tol:
+            return True
+    return False
+
+
 def compute_v2_signal(cl, op, vw, ef, es, vm, vol, rsi, st, bnf_bull, bnf_bear,
                        cross_recent_ce, cross_recent_pe, entry_mode="v2") -> tuple:
     """
@@ -394,7 +415,8 @@ def simulate_day(target_date: date,
                  require_supertrend: bool = True,
                  require_bnf: bool = True,
                  require_candle_color: bool = True,
-                 require_no_divergence: bool = False):
+                 require_no_divergence: bool = False,
+                 require_pullback: bool = False):
     """
     Simulate V2 strategy for one trading day.
     All 11 improvements active: dual EMA, RSI, partial exit,
@@ -585,6 +607,16 @@ def simulate_day(target_date: date,
                 # New price high but RSI didn't also make a new high -> up-move exhausted, skip CE
                 if raw_buy and not np.isnan(phc) and not np.isnan(phr) and cl > phc and rsi < phr:
                     raw_buy = False
+
+            if require_pullback:
+                # Only take the breakout if price recently retested EMA9 first —
+                # filters out chasing a candle that never paused/pulled back.
+                if raw_buy and not _recent_pullback(sday["Low"], sday["High"], ema_fast,
+                                                     i, V2_PULLBACK_LOOKBACK, V2_PULLBACK_TOL_PCT, "up"):
+                    raw_buy = False
+                if raw_sell and not _recent_pullback(sday["Low"], sday["High"], ema_fast,
+                                                      i, V2_PULLBACK_LOOKBACK, V2_PULLBACK_TOL_PCT, "down"):
+                    raw_sell = False
 
         # ── Manage open position ──────────────────────────────────
         if position["active"]:

@@ -209,13 +209,25 @@ def _load_scrip():
 
 
 def _next_thursday():
-    """Nearest upcoming Tuesday — Nifty weekly expiry moved to Tuesday (NSE 2025)."""
+    """
+    NEXT week's Tuesday expiry (Nifty weekly expiry moved to Tuesday, NSE 2025)
+    — deliberately one cycle further out than the nearest expiry. Trading the
+    current week's contract means as little as 0-4 DTE, maximizing theta decay
+    speed; research on why option buyers lose money consistently flags this as
+    a top mistake. One extra week of time value costs some leverage but gives
+    a real cushion against decay eating a move before it plays out. Not
+    backtest-validated — backtest.py's constant-delta P&L model doesn't
+    simulate theta decay at all, so this can only be judged from live/paper
+    results, not backtest numbers.
+    """
     today = _today()
+    nearest = today + timedelta(days=2)
     for i in range(8):
         d = today + timedelta(days=i)
         if d.weekday() == 1:   # 1 = Tuesday
-            return d
-    return today + timedelta(days=2)
+            nearest = d
+            break
+    return nearest + timedelta(days=7)
 
 
 def _expiry_tag(d: date) -> str:
