@@ -15,6 +15,8 @@ Tokens (NSE):
 
 import pandas as pd
 import requests
+import socket
+import uuid
 import time as _time
 from datetime import datetime, date, timedelta
 from logzero import logger
@@ -28,16 +30,55 @@ CHUNK_DAYS = 60            # safe chunk size for 5m API requests
 API_URL    = "https://apiconnect.angelbroking.com/rest/secure/angelbroking/historical/v1/getCandleData"
 
 
+def _local_ip() -> str:
+    """Best-effort real local IP (falls back to loopback if undetectable)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.5)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
+def _public_ip() -> str:
+    """Best-effort real public IP (cached per-process; falls back to loopback)."""
+    global _PUBLIC_IP_CACHE
+    if _PUBLIC_IP_CACHE is not None:
+        return _PUBLIC_IP_CACHE
+    try:
+        _PUBLIC_IP_CACHE = requests.get("https://api.ipify.org", timeout=3).text.strip()
+    except Exception:
+        _PUBLIC_IP_CACHE = "127.0.0.1"
+    return _PUBLIC_IP_CACHE
+
+
+def _mac_address() -> str:
+    try:
+        n = uuid.getnode()
+        return ":".join(f"{(n >> ele) & 0xff:02x}" for ele in range(40, -8, -8))
+    except Exception:
+        return "00:00:00:00:00:00"
+
+
+_PUBLIC_IP_CACHE = None
+
+
 def _headers(auth_token: str, api_key: str) -> dict:
+    # Angel One's docs expect genuine client IP/MAC values on these headers —
+    # loopback/all-zero placeholders were previously used here, which may
+    # contribute to intermittent 403s from Angel's edge/gateway layer.
     return {
         "Authorization"   : auth_token,
         "Content-Type"    : "application/json",
         "Accept"          : "application/json",
         "X-UserType"      : "USER",
         "X-SourceID"      : "WEB",
-        "X-ClientLocalIP" : "127.0.0.1",
-        "X-ClientPublicIP": "127.0.0.1",
-        "X-MACAddress"    : "00:00:00:00:00:00",
+        "X-ClientLocalIP" : _local_ip(),
+        "X-ClientPublicIP": _public_ip(),
+        "X-MACAddress"    : _mac_address(),
         "X-PrivateKey"    : api_key,
     }
 

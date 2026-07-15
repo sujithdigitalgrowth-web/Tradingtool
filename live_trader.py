@@ -281,6 +281,10 @@ class AngelTrader:
         # dominant exit mechanism, ported here to match validated results).
         self._ema_ref = {"close": None, "ema9": None}
 
+        # Daily (prev-close) data never changes intraday — cache per day
+        # instead of re-hitting Angel One's historical API every ~2 minutes.
+        self._daily_cache = {"date": None, "df": None}
+
         # Config (set by start())
         self.max_trades   = 2
         self.lots         = 1
@@ -416,15 +420,21 @@ class AngelTrader:
         time.sleep(1)   # space out Angel One historical-API calls — avoid rate-limit throttling
         df_bnf   = _fetch_intraday(self._auth, self._api_key,
                                    BANKBEES_TOKEN, lookback, today)
-        time.sleep(1)
-        df_1d    = _fetch_daily(self._auth, self._api_key,
-                                NIFTYBEES_TOKEN, lookback, today)
 
-        # Scale daily data to Nifty proxy
-        df_nifty_1d = df_1d.copy()
-        if not df_nifty_1d.empty:
-            for col in ["Open", "High", "Low", "Close"]:
-                df_nifty_1d[col] = (df_nifty_1d[col] * NIFTY_MULTIPLIER).round(2)
+        # Daily (prev-close) data never changes intraday — fetch once per day
+        # and cache, instead of re-hitting the API every ~2-minute cycle.
+        if self._daily_cache["date"] == today and self._daily_cache["df"] is not None:
+            df_nifty_1d = self._daily_cache["df"]
+        else:
+            time.sleep(1)
+            df_1d = _fetch_daily(self._auth, self._api_key,
+                                 NIFTYBEES_TOKEN, lookback, today)
+            df_nifty_1d = df_1d.copy()
+            if not df_nifty_1d.empty:
+                for col in ["Open", "High", "Low", "Close"]:
+                    df_nifty_1d[col] = (df_nifty_1d[col] * NIFTY_MULTIPLIER).round(2)
+                self._daily_cache = {"date": today, "df": df_nifty_1d}
+            # empty result (fetch failed) — leave cache empty, retry next cycle
 
         # VIX from NSE public API (live current value)
         df_vix = pd.DataFrame()
@@ -447,6 +457,17 @@ class AngelTrader:
             pass
 
         return df_nbees, df_nifty_1d, df_bnf, df_vix
+
+    def _fetch_nbees_only(self):
+        """
+        Lightweight fetch — just NIFTYBEES 5m candles, used to refresh the
+        EMA9 reference while a position is open. Skips BankNifty and daily
+        data (not needed for EMA_EXIT), roughly a third of the API calls
+        _fetch_live_data would make for the same purpose.
+        """
+        today    = _today()
+        lookback = today - timedelta(days=12)
+        return _fetch_intraday(self._auth, self._api_key, NIFTYBEES_TOKEN, lookback, today)
 
     # ── Signal detection (mirrors backtest V2 logic exactly) ─────
 
@@ -1129,7 +1150,7 @@ class AngelTrader:
                     # underlying's EMA9 reference fresh so _manage_position's
                     # EMA_EXIT check has current data to compare against.
                     try:
-                        df_nbees, _, _, _ = self._fetch_live_data()
+                        df_nbees = self._fetch_nbees_only()
                         self._update_ema_ref(df_nbees)
                     except Exception as e:
                         logger.warning(f"EMA ref refresh (position open) failed: {e}")
