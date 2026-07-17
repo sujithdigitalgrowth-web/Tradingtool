@@ -1041,8 +1041,16 @@ class AngelTrader:
                 if ltp > pos["trail_high"]:
                     self.position["trail_high"] = ltp
 
-        # After partial, SL steps to breakeven (trail_floor = 0%)
-        trail_floor = bt.V2_TRAIL_FLOOR if pos["partial_done"] else 0.0
+        # After partial, SL steps to breakeven (trail_floor = 0%).
+        # Big-winner lock: once peak gain reaches V2_TRAIL_LOCK_TRIGGER, the floor
+        # ratchets up with the peak instead of sitting flat at breakeven — stops a
+        # large spike from fully round-tripping back to a loss before EMA9 flips.
+        base_floor  = bt.V2_TRAIL_FLOOR if pos["partial_done"] else 0.0
+        peak_pct    = (pos["trail_high"] - pos["entry_price"]) / pos["entry_price"] if pos["entry_price"] > 0 else 0.0
+        if peak_pct >= bt.V2_TRAIL_LOCK_TRIGGER:
+            trail_floor = max(base_floor, peak_pct - bt.V2_TRAIL_LOCK_GIVEBACK)
+        else:
+            trail_floor = base_floor
         trail_exit  = pos["trail_on"] and opt_pct <= trail_floor
 
         # ── Spot-based SL (two-tier) ──────────────────────────────────────────

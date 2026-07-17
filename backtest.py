@@ -46,6 +46,14 @@ V2_SPOT_SL_HARD    = 80     # spot hard stop — immediate exit (market genuinel
 V2_PARTIAL_PCT     = 0.10   # 2-lot: partial exit 1 lot at +10%
 V2_TRAIL_TRIGGER   = 0.10   # activate trail at +10%
 V2_TRAIL_FLOOR     = 0.00   # after partial: SL steps to breakeven (0%)
+V2_TRAIL_LOCK_TRIGGER = 0.15   # only start ratcheting the floor once a trade has been a genuinely
+                                # big winner (peak >= this) — below it, EMA_EXIT stays the primary
+                                # exit and is left alone (moderate winners keep running as before).
+                                # Backtested Jul 2026 (60 days): trigger/giveback swept 15-25%/6-10%;
+                                # this combo protects big spikes (like the Jul-17 +18% -> -165 trade)
+                                # at a small average cost (~-Rs.600/44 days) vs. no lock at all.
+V2_TRAIL_LOCK_GIVEBACK = 0.08  # once past the lock trigger, floor = peak_pct - this many points,
+                                # so a big spike can't fully round-trip back to breakeven/loss
 V2_1LOT_TP_PCT     = 0.10   # 1-lot: exit at +10% option gain …
 V2_1LOT_TP_RUPEES  = 1100   # … or ₹1,100 absolute P&L — whichever comes first (only used if V2_1LOT_HARD_TP)
 V2_1LOT_HARD_TP    = False  # if False (validated default): 1-lot skips the hard cap above and
@@ -411,6 +419,8 @@ def simulate_day(target_date: date,
                  ema_exit_min_loss: float = 0.0,
                  trail_trigger: float = None,
                  trail_floor_1lot: float = 0.0,
+                 trail_lock_trigger: float = None,
+                 trail_lock_giveback: float = None,
                  require_vol_surge: bool = False,
                  require_supertrend: bool = True,
                  require_bnf: bool = True,
@@ -520,7 +530,7 @@ def simulate_day(target_date: date,
         "active"      : False, "type": None,
         "entry_spot"  : 0.0,   "entry_option_price": 0.0,
         "entry_time"  : None,  "qty": QTY,
-        "trail_on"    : False, "partial_done": False,
+        "trail_on"    : False, "partial_done": False, "trail_peak_pct": 0.0,
         "sl_warn_count": 0,   # consecutive candle closes in SL warning zone
         "ema_warn_count": 0,  # consecutive candle closes back through EMA9
     }
@@ -628,6 +638,9 @@ def simulate_day(target_date: date,
             _trig = trail_trigger if trail_trigger is not None else V2_TRAIL_TRIGGER
             if not position["trail_on"] and opt_pct >= _trig:
                 position["trail_on"] = True
+                position["trail_peak_pct"] = opt_pct
+            if position["trail_on"] and opt_pct > position["trail_peak_pct"]:
+                position["trail_peak_pct"] = opt_pct
 
             # ── Partial exit at +10% (only when holding 2+ lots) ────
             # Minimum tradeable unit on NSE is 1 full lot (LOT_SIZE units).
@@ -649,7 +662,17 @@ def simulate_day(target_date: date,
 
             # After partial (2-lot): SL steps to V2_TRAIL_FLOOR.
             # 1-lot never partials — floor is independently tunable via trail_floor_1lot.
-            trail_floor = V2_TRAIL_FLOOR if position["partial_done"] else trail_floor_1lot
+            base_floor = V2_TRAIL_FLOOR if position["partial_done"] else trail_floor_1lot
+            # Big-winner lock: EMA_EXIT stays the primary exit for moderate gains.
+            # Only once a trade has peaked well past the lock trigger does the floor
+            # ratchet up with the peak, so a large spike can't fully round-trip back
+            # to breakeven/loss before EMA9 gets a chance to flip.
+            _lock_trig = trail_lock_trigger if trail_lock_trigger is not None else V2_TRAIL_LOCK_TRIGGER
+            _lock_gb   = trail_lock_giveback if trail_lock_giveback is not None else V2_TRAIL_LOCK_GIVEBACK
+            if position["trail_peak_pct"] >= _lock_trig:
+                trail_floor = max(base_floor, position["trail_peak_pct"] - _lock_gb)
+            else:
+                trail_floor = base_floor
 
             # ── TARGET condition — differs for 1-lot vs 2-lot ───────────
             is_one_lot = position["initial_qty"] == LOT_SIZE
@@ -785,7 +808,7 @@ def simulate_day(target_date: date,
                         "entry_spot"        : spot_cl, "entry_option_price": entry_opt_price,
                         "entry_time"        : time_str, "qty": QTY,
                         "initial_qty"       : QTY,   # locked at entry, never changes
-                        "trail_on"          : False, "partial_done": False,
+                        "trail_on"          : False, "partial_done": False, "trail_peak_pct": 0.0,
                         "sl_warn_count"     : 0,
                         "ema_warn_count"    : 0,
                     })
