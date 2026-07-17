@@ -132,7 +132,7 @@ def api_live_state():
 @app.route("/api/start-trading", methods=["POST"])
 def api_start_trading():
     body       = request.json or {}
-    max_trades = max(1, min(5, int(body.get("max_trades", 2))))
+    max_trades = max(1, min(6, int(body.get("max_trades", 2))))
     lots       = max(1, min(20, int(body.get("lots", 1))))
     paper      = bool(body.get("paper", False))
     try:
@@ -243,7 +243,7 @@ def api_get_config():
 @app.route("/api/trading-config", methods=["POST"])
 def api_set_config():
     body       = request.json or {}
-    max_trades = max(1, min(5, int(body.get("max_trades", 2))))
+    max_trades = max(1, min(6, int(body.get("max_trades", 2))))
     lots       = max(1, min(20, int(body.get("lots", 1))))
     existing   = _get_trading_config()
     cfg = {"max_trades": max_trades, "lots": lots,
@@ -749,7 +749,7 @@ TEMPLATE = r"""
       <div>
         <label class="text-sm font-semibold text-gray-700 block mb-1">Max Trades per Day</label>
         <div class="flex items-center gap-3">
-          <input id="m-max-trades" type="number" min="1" max="5" value="2"
+          <input id="m-max-trades" type="number" min="1" max="6" value="2"
             class="w-20 border border-gray-300 rounded px-3 py-2 text-sm text-gray-800"/>
           <span class="text-xs text-gray-400">Bot won't exceed this even if signals fire more</span>
         </div>
