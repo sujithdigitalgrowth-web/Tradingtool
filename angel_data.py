@@ -45,9 +45,10 @@ def _local_ip() -> str:
 
 def _public_ip() -> str:
     """
-    Best-effort real public IP (cached per-process; falls back to loopback).
-    Only a successful lookup is cached — a transient failure must not poison
-    every future call for the rest of the process's life.
+    Best-effort real public IP (cached per-process; falls back to the local
+    interface IP, which on a non-NAT'd VPS like Vultr's *is* the public IP).
+    Only a successful ipify lookup is cached — a transient failure must not
+    poison every future call for the rest of the process's life.
     """
     global _PUBLIC_IP_CACHE
     if _PUBLIC_IP_CACHE is not None:
@@ -56,7 +57,7 @@ def _public_ip() -> str:
         _PUBLIC_IP_CACHE = requests.get("https://api.ipify.org", timeout=3).text.strip()
         return _PUBLIC_IP_CACHE
     except Exception:
-        return "127.0.0.1"
+        return _local_ip()
 
 
 def _mac_address() -> str:
