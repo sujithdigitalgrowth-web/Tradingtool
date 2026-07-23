@@ -426,7 +426,8 @@ def simulate_day(target_date: date,
                  require_bnf: bool = True,
                  require_candle_color: bool = True,
                  require_no_divergence: bool = False,
-                 require_pullback: bool = False):
+                 require_pullback: bool = False,
+                 reverse_on_ema_exit: bool = False):
     """
     Simulate V2 strategy for one trading day.
     All 11 improvements active: dual EMA, RSI, partial exit,
@@ -766,6 +767,31 @@ def simulate_day(target_date: date,
                 trade_count     += 1
                 position["active"] = False
                 last_signal        = None
+
+                # ── Reverse-on-EMA-exit: EMA9 flipping against the position is
+                # itself directional evidence for the other side, so immediately
+                # open the opposite option instead of waiting for a fresh signal.
+                if (reverse_on_ema_exit and exit_reason == "EMA_EXIT"
+                        and trade_count < V2_MAX_TRADES
+                        and daily_pnl > MAX_DAILY_LOSS
+                        and daily_pnl < DAILY_PROFIT_TARGET):
+                    rev_in_morning   = V2_NO_ENTRY_BEFORE <= time_str <= V2_MORNING_END
+                    rev_in_afternoon = (V2_AFTERNOON_START <= time_str < NO_ENTRY_AFTER) and not is_thursday
+                    if rev_in_morning or rev_in_afternoon:
+                        rev_type = "PE" if position["type"] == "CE" else "CE"
+                        dte      = max(1, (3 - target_date.weekday()) % 7 or 7)
+                        rev_price = estimate_option_price(spot_cl, dte)
+                        if rev_price * QTY <= balance:
+                            position.update({
+                                "active"            : True,  "type": rev_type,
+                                "entry_spot"        : spot_cl, "entry_option_price": rev_price,
+                                "entry_time"        : time_str, "qty": QTY,
+                                "initial_qty"       : QTY,
+                                "trail_on"          : False, "partial_done": False, "trail_peak_pct": 0.0,
+                                "sl_warn_count"     : 0,
+                                "ema_warn_count"    : 0,
+                            })
+                            last_signal = "sell" if rev_type == "PE" else "buy"
 
         # ── Entry gate ────────────────────────────────────────────
         in_morning   = V2_NO_ENTRY_BEFORE <= time_str <= V2_MORNING_END

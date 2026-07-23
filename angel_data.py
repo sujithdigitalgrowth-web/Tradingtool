@@ -44,15 +44,19 @@ def _local_ip() -> str:
 
 
 def _public_ip() -> str:
-    """Best-effort real public IP (cached per-process; falls back to loopback)."""
+    """
+    Best-effort real public IP (cached per-process; falls back to loopback).
+    Only a successful lookup is cached — a transient failure must not poison
+    every future call for the rest of the process's life.
+    """
     global _PUBLIC_IP_CACHE
     if _PUBLIC_IP_CACHE is not None:
         return _PUBLIC_IP_CACHE
     try:
         _PUBLIC_IP_CACHE = requests.get("https://api.ipify.org", timeout=3).text.strip()
+        return _PUBLIC_IP_CACHE
     except Exception:
-        _PUBLIC_IP_CACHE = "127.0.0.1"
-    return _PUBLIC_IP_CACHE
+        return "127.0.0.1"
 
 
 def _mac_address() -> str:
