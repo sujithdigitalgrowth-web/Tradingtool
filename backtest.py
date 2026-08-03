@@ -22,7 +22,7 @@ Improvements (v2.2):
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import json, os, time as _time
+import json, os, time as _time, requests
 from datetime import datetime, date, timedelta
 
 # ── Config ───────────────────────────────────────────────────────
@@ -35,6 +35,10 @@ NO_ENTRY_AFTER       = "14:50"
 SQUAREOFF_TIME       = "15:15"
 MAX_DAILY_LOSS       = -8000
 DAILY_PROFIT_TARGET  = 6000
+V2_LOSS_COOLDOWN_CANDLES = 3   # after a losing exit, block new entries in that same
+                                # direction (CE/PE) for this many closed candles (0 disables)
+V2_EMA_EXIT_CONFIRM_CANDLES = 2   # consecutive closed candles crossed back through EMA9
+                                    # required before EMA_EXIT fires (1 = old instant behavior)
 
 # ── V2 Strategy constants ─────────────────────────────────────────
 V2_TP_OPTION_PCT   = 0.20   # 2-lot: remaining lot hard TP at +20%
@@ -43,6 +47,9 @@ V2_SL_WARN_PCT     = 0.17   # premium warning zone — 2 polls needed (slow blee
 V2_SIGNAL_EXIT_LOSS = 0.05  # A+B exit: min loss before counter-signal/VWAP-flip triggers
 V2_SPOT_SL_WARN    = 50     # spot warning zone — 2 polls needed (small move, wait and see)
 V2_SPOT_SL_HARD    = 80     # spot hard stop — immediate exit (market genuinely reversed)
+V2_EMA_CONFIRM_BACKSTOP_PTS = 25   # half of V2_SPOT_SL_WARN — while EMA_EXIT is waiting on
+                                    # confirmation, an adverse spot move past this overrides
+                                    # the wait and exits immediately (0 disables)
 V2_PARTIAL_PCT     = 0.10   # 2-lot: partial exit 1 lot at +10%
 V2_TRAIL_TRIGGER   = 0.10   # activate trail at +10%
 V2_TRAIL_FLOOR     = 0.00   # after partial: SL steps to breakeven (0%)
@@ -77,6 +84,8 @@ V2_MORNING_END     = "12:00"   # morning session end
 V2_AFTERNOON_START = "13:30"   # afternoon session start (lunch 12:00-13:30 blocked)
 V2_ST_PERIOD       = 7         # Supertrend ATR period
 V2_ST_MULT         = 2.0       # Supertrend ATR multiplier
+V2_ADX_PERIOD      = 14        # ADX regime-filter period
+V2_ADX_MIN         = 20        # only trade when ADX(14) > this (trending, not choppy/range-bound)
 V2_MAX_FROM_OPEN_PCT = 0.5     # skip entry if price already moved >0.5% from day open
 V2_DIVERGENCE_LOOKBACK = 5     # candles to look back for RSI-divergence (exhaustion) check
 V2_PULLBACK_LOOKBACK = 6       # candles to look back for a pullback-to-EMA9 touch
@@ -138,26 +147,79 @@ def _fetch_etf(ticker_sym: str, start: date, end: date, interval: str = "5m") ->
         return pd.DataFrame()
 
 
-def fetch_range_data_angel(start: date, end: date):
-    """
-    Fetch all V2 data from Angel One Smart API (no 58-day limit).
-    Returns (df_nsei_5m, df_1d, df_nbees_5m, df_bnf_5m, df_vix_1d)
-    VIX still fetched from Yahoo Finance (daily data, no limit issue).
-    """
-    from angel_data import fetch_all as _angel_fetch_all
-    df_5m, df_1d, df_nbees, df_bnf = _angel_fetch_all(start, end)
+def _fetch_vix_nse_chunk(sess, headers, start: date, end: date) -> pd.DataFrame:
+    resp = sess.get("https://www.nseindia.com/api/historicalOR/vixhistory",
+                    headers=headers,
+                    params={"from": start.strftime("%d-%m-%Y"), "to": end.strftime("%d-%m-%Y")},
+                    timeout=10)
+    rows = resp.json().get("data", [])
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df["timestamp"] = pd.to_datetime(df["EOD_TIMESTAMP"], format="%d-%b-%Y")
+    df = df.set_index("timestamp").sort_index()
+    df.index = df.index.tz_localize("Asia/Kolkata")
+    df = df.rename(columns={"EOD_CLOSE_INDEX_VAL": "Close"})[["Close"]]
+    df["Close"] = df["Close"].astype(float)
+    return df
 
-    # VIX — historical daily data from Yahoo Finance (correct per-day values)
-    df_vix = pd.DataFrame()
+
+def _fetch_vix_nse(start: date, end: date) -> pd.DataFrame:
+    """
+    Historical India VIX from NSE's public historicalOR/vixhistory endpoint —
+    the same NSE source family live_trader.py already uses for the live VIX
+    value (via /api/allIndices). Yahoo's ^INDIAVIX (yfinance) has become
+    unreliable (YFRateLimitError even for single small requests), so this is
+    now the primary source; Yahoo is kept only as a last-resort fallback.
+
+    NSE silently truncates this endpoint to ~70 rows per request regardless
+    of the requested date range (confirmed empirically — a 90+ day request
+    and a 200+ day request both came back with exactly 70 rows, cut off at
+    different points), so requests over ~55 days are chunked and concatenated,
+    matching the CHUNK_DAYS pattern angel_data.py already uses for candles.
+    Returns a DataFrame with a DatetimeIndex (Asia/Kolkata) and a "Close" column.
+    """
+    try:
+        sess = requests.Session()
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                   "Accept": "application/json", "Referer": "https://www.nseindia.com"}
+        sess.get("https://www.nseindia.com", headers=headers, timeout=10)
+
+        chunk_days = 55
+        parts = []
+        chunk_start = start
+        while chunk_start <= end:
+            chunk_end = min(chunk_start + timedelta(days=chunk_days), end)
+            parts.append(_fetch_vix_nse_chunk(sess, headers, chunk_start, chunk_end))
+            chunk_start = chunk_end + timedelta(days=1)
+
+        df = pd.concat([p for p in parts if not p.empty]) if parts else pd.DataFrame()
+        if not df.empty:
+            return df[~df.index.duplicated(keep="first")].sort_index()
+        return df
+    except Exception as e:
+        print(f"  NSE VIX fetch failed ({e}) — falling back to Yahoo Finance")
+
+    # Fallback: Yahoo Finance (only reached if NSE is unreachable)
     try:
         vix_t  = yf.Ticker("^INDIAVIX")
         df_vix = vix_t.history(start=start - timedelta(days=10),
                                end=end + timedelta(days=2), interval="1d")
         if not df_vix.empty and df_vix.index.tz is not None:
             df_vix.index = df_vix.index.tz_convert("Asia/Kolkata")
+        return df_vix
     except Exception:
-        pass
+        return pd.DataFrame()
 
+
+def fetch_range_data_angel(start: date, end: date):
+    """
+    Fetch all V2 data from Angel One Smart API (no 58-day limit).
+    Returns (df_nsei_5m, df_1d, df_nbees_5m, df_bnf_5m, df_vix_1d)
+    """
+    from angel_data import fetch_all as _angel_fetch_all
+    df_5m, df_1d, df_nbees, df_bnf = _angel_fetch_all(start, end)
+    df_vix = _fetch_vix_nse(start - timedelta(days=10), end + timedelta(days=2))
     return df_5m, df_1d, df_nbees, df_bnf, df_vix
 
 
@@ -172,16 +234,7 @@ def fetch_range_data_v2(start: date, end: date):
     df_5m, df_1d = fetch_range_data(start, end)
     df_nbees     = _fetch_etf("NIFTYBEES.NS", start, end, interval="5m")
     df_bnf       = _fetch_etf("BANKBEES.NS",  start, end, interval="5m")
-
-    df_vix = pd.DataFrame()
-    try:
-        vix_t     = yf.Ticker("^INDIAVIX")
-        fetch_end = end + timedelta(days=2)
-        df_vix    = vix_t.history(start=start - timedelta(days=10), end=fetch_end, interval="1d")
-        if not df_vix.empty and df_vix.index.tz is not None:
-            df_vix.index = df_vix.index.tz_convert("Asia/Kolkata")
-    except Exception:
-        pass
+    df_vix       = _fetch_vix_nse(start - timedelta(days=10), end + timedelta(days=2))
 
     return df_5m, df_1d, df_nbees, df_bnf, df_vix
 
@@ -232,6 +285,32 @@ def _supertrend(df: pd.DataFrame, period: int = 7, multiplier: float = 2.0) -> p
         else:                   dirn[i] = dirn[i-1]
 
     return pd.Series(dirn, index=df.index)
+
+
+def _adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """
+    Wilder's ADX — trend-strength regime filter (non-directional: high ADX
+    means a strong trend either way, low ADX means a choppy/range-bound
+    market). Same Wilder smoothing (ewm alpha=1/period) as _rsi/_atr above.
+    """
+    h, l, c = df["High"], df["Low"], df["Close"]
+    up_move   = h.diff()
+    down_move = -l.diff()
+    plus_dm  = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
+    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index)
+
+    pc = c.shift(1).fillna(c.iloc[0])
+    tr = pd.concat([(h - l), (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+
+    tr_w       = tr.ewm(alpha=1/period, adjust=False).mean()
+    plus_dm_w  = plus_dm.ewm(alpha=1/period, adjust=False).mean()
+    minus_dm_w = minus_dm.ewm(alpha=1/period, adjust=False).mean()
+
+    plus_di  = 100 * plus_dm_w  / tr_w.replace(0, np.nan)
+    minus_di = 100 * minus_dm_w / tr_w.replace(0, np.nan)
+    dx  = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    adx = dx.ewm(alpha=1/period, adjust=False).mean()
+    return adx.fillna(0)
 
 
 def _fresh_cross(ema_fast_s: pd.Series, ema_slow_s: pd.Series, i: int,
@@ -427,7 +506,10 @@ def simulate_day(target_date: date,
                  require_candle_color: bool = True,
                  require_no_divergence: bool = False,
                  require_pullback: bool = False,
-                 reverse_on_ema_exit: bool = False):
+                 reverse_on_ema_exit: bool = False,
+                 loss_cooldown_candles: int = 0,
+                 require_adx: bool = False,
+                 ema_confirm_backstop_pts: float = 0):
     """
     Simulate V2 strategy for one trading day.
     All 11 improvements active: dual EMA, RSI, partial exit,
@@ -498,12 +580,14 @@ def simulate_day(target_date: date,
         ema_slow = _slice(_warm["Close"].ewm(span=V2_EMA_SLOW, adjust=False).mean())
         rsi_s    = _slice(_rsi(_warm["Close"], V2_RSI_PERIOD))
         st_s     = _slice(_supertrend(_warm, V2_ST_PERIOD, V2_ST_MULT))
+        adx_s    = _slice(_adx(_warm, V2_ADX_PERIOD))
         vol_ma   = _slice(_warm["Volume"].rolling(20, min_periods=5).mean())
     else:
         ema_fast = sday["Close"].ewm(span=V2_EMA_FAST, adjust=False).mean()
         ema_slow = sday["Close"].ewm(span=V2_EMA_SLOW, adjust=False).mean()
         rsi_s    = _rsi(sday["Close"], V2_RSI_PERIOD)
         st_s     = _supertrend(sday, V2_ST_PERIOD, V2_ST_MULT)
+        adx_s    = _adx(sday, V2_ADX_PERIOD)
         vol_ma   = sday["Volume"].rolling(20, min_periods=5).mean()
 
     atr_s = _atr(sday, V2_ATR_PERIOD)
@@ -526,6 +610,13 @@ def simulate_day(target_date: date,
     daily_pnl   = 0.0
     trade_count = 0
     last_signal = None
+    cooldown_skips = 0
+    adx_skips   = 0
+    adx_skip_events = []      # [{"time","side","adx"}] — which entries ADX blocked, for A/B diffing
+    ema_unconfirm_count = 0   # times an EMA_EXIT confirmation streak broke before completing
+    # Candle index up to which new entries in that direction are blocked
+    # (only used when loss_cooldown_candles > 0).
+    cooldown_until = {"CE": -1, "PE": -1}
 
     position = {
         "active"      : False, "type": None,
@@ -534,6 +625,7 @@ def simulate_day(target_date: date,
         "trail_on"    : False, "partial_done": False, "trail_peak_pct": 0.0,
         "sl_warn_count": 0,   # consecutive candle closes in SL warning zone
         "ema_warn_count": 0,  # consecutive candle closes back through EMA9
+        "realized_pnl": 0.0,  # running pnl for this trade cycle (partial + final)
     }
 
     nifty_candles = list(nifty_day.iterrows())
@@ -561,6 +653,7 @@ def simulate_day(target_date: date,
         at   = float(atr_s.iloc[i])   if not np.isnan(atr_s.iloc[i])   else 0.0
         rsi  = float(rsi_s.iloc[i])   if not np.isnan(rsi_s.iloc[i])   else 50.0
         st   = int(st_s.iloc[i])
+        adx  = float(adx_s.iloc[i])   if not np.isnan(adx_s.iloc[i])   else 0.0
 
         # Bank Nifty alignment
         if has_bnf and bnf_vwap is not None:
@@ -660,6 +753,7 @@ def simulate_day(target_date: date,
                 trades.append(_trade_record(position, time_str, p_spot, p_pnl_pu, "PARTIAL_TP", qty=LOT_SIZE))
                 position["qty"]          -= LOT_SIZE
                 position["partial_done"]  = True
+                position["realized_pnl"] += partial_pnl
 
             # After partial (2-lot): SL steps to V2_TRAIL_FLOOR.
             # 1-lot never partials — floor is independently tunable via trail_floor_1lot.
@@ -709,10 +803,28 @@ def simulate_day(target_date: date,
             if ema_breach:
                 position["ema_warn_count"] = position.get("ema_warn_count", 0) + 1
             else:
+                if position.get("ema_warn_count", 0) > 0:
+                    ema_unconfirm_count += 1
                 position["ema_warn_count"] = 0
             ema_confirmed = position["ema_warn_count"] >= ema_exit_confirm
             ema_exit    = (ema_confirmed and opt_pct <= -ema_exit_min_loss
                            if ema_exit_min_loss > 0 else ema_confirmed)
+
+            # EMA-confirm hard backstop: while inside the confirm waiting
+            # window (breach counter > 0 but hasn't reached ema_exit_confirm
+            # yet), a fast adverse spot move overrides the wait — exits
+            # immediately instead of risking a slow multi-candle confirm.
+            # Approximated via this candle's High/Low (the adverse extreme
+            # for the position side) since backtest only has 5-min OHLC, not
+            # tick data — live_trader.py checks this on every 5s poll instead.
+            ema_backstop = False
+            if ema_confirm_backstop_pts > 0 and 0 < position["ema_warn_count"] < ema_exit_confirm:
+                adverse_px   = lo if position["type"] == "CE" else hi
+                adverse_move = (position["entry_spot"] - adverse_px if position["type"] == "CE"
+                                else adverse_px - position["entry_spot"])
+                if adverse_move > ema_confirm_backstop_pts:
+                    ema_backstop = True
+
             rev_exit    = (at > 0 and (hi - lo) > at * V2_REV_ATR_MULT and
                            ((position["type"] == "CE" and cl < op) or
                             (position["type"] == "PE" and cl > op)))
@@ -736,6 +848,11 @@ def simulate_day(target_date: date,
                 exit_reason = "SIGNAL_EXIT"
             elif ema_exit:
                 exit_reason = "EMA_EXIT"
+            elif ema_backstop:
+                exit_reason = "EMA_EXIT_BACKSTOP"
+                print(f"  [{time_str}] EMA-confirm backstop forced exit — adverse move > "
+                      f"{ema_confirm_backstop_pts}pts while awaiting confirmation "
+                      f"({position['ema_warn_count']}/{ema_exit_confirm})")
             elif rev_exit:
                 exit_reason = "REV_EXIT"
 
@@ -765,8 +882,18 @@ def simulate_day(target_date: date,
                 balance += pnl; daily_pnl += pnl
                 trades.append(_trade_record(position, time_str, e_spot, e_pnl_pu, exit_reason))
                 trade_count     += 1
+                total_trade_pnl = position["realized_pnl"] + pnl
                 position["active"] = False
                 last_signal        = None
+
+                # Loss cooldown: block re-entry in the same direction for the
+                # next N closed candles (blocks this candle too, preventing an
+                # immediate same-candle re-entry right after the loss).
+                if loss_cooldown_candles > 0 and total_trade_pnl < 0:
+                    cooldown_until[position["type"]] = i + loss_cooldown_candles
+                    print(f"  [{time_str}] Loss cooldown: blocking new {position['type']} "
+                          f"entries through candle #{i + loss_cooldown_candles} "
+                          f"(trade pnl={total_trade_pnl:.2f})")
 
                 # ── Reverse-on-EMA-exit: EMA9 flipping against the position is
                 # itself directional evidence for the other side, so immediately
@@ -790,6 +917,7 @@ def simulate_day(target_date: date,
                                 "trail_on"          : False, "partial_done": False, "trail_peak_pct": 0.0,
                                 "sl_warn_count"     : 0,
                                 "ema_warn_count"    : 0,
+                                "realized_pnl"      : 0.0,
                             })
                             last_signal = "sell" if rev_type == "PE" else "buy"
 
@@ -818,6 +946,35 @@ def simulate_day(target_date: date,
                 if raw_sell and move_pe > max_from_open_pct:
                     raw_sell = False
 
+            # ADX regime filter: only enter when the market is actually
+            # trending (ADX > V2_ADX_MIN) — skips choppy/range-bound
+            # conditions where the other 7 conditions can still align by noise.
+            if require_adx and adx <= V2_ADX_MIN:
+                if raw_buy:
+                    print(f"  [{time_str}] Skipped BUY_CE — ADX {adx:.1f} <= {V2_ADX_MIN} (choppy regime)")
+                    raw_buy = False
+                    adx_skips += 1
+                    adx_skip_events.append({"time": time_str, "side": "CE", "adx": round(adx, 1)})
+                if raw_sell:
+                    print(f"  [{time_str}] Skipped BUY_PE — ADX {adx:.1f} <= {V2_ADX_MIN} (choppy regime)")
+                    raw_sell = False
+                    adx_skips += 1
+                    adx_skip_events.append({"time": time_str, "side": "PE", "adx": round(adx, 1)})
+
+            # Loss cooldown: suppress re-entry in a direction that just lost,
+            # for loss_cooldown_candles closed candles (0 = disabled/baseline).
+            if loss_cooldown_candles > 0:
+                if raw_buy and i <= cooldown_until["CE"]:
+                    print(f"  [{time_str}] Skipped BUY_CE — loss cooldown active "
+                          f"(through candle #{cooldown_until['CE']})")
+                    raw_buy = False
+                    cooldown_skips += 1
+                if raw_sell and i <= cooldown_until["PE"]:
+                    print(f"  [{time_str}] Skipped BUY_PE — loss cooldown active "
+                          f"(through candle #{cooldown_until['PE']})")
+                    raw_sell = False
+                    cooldown_skips += 1
+
             signal = None
             if raw_buy  and last_signal != "buy":
                 signal = "BUY_CE"; last_signal = "buy"
@@ -837,10 +994,13 @@ def simulate_day(target_date: date,
                         "trail_on"          : False, "partial_done": False, "trail_peak_pct": 0.0,
                         "sl_warn_count"     : 0,
                         "ema_warn_count"    : 0,
+                        "realized_pnl"      : 0.0,
                     })
 
     result = _build_result(target_date, nifty_day, prev_close, daily_pnl,
-                           balance, trades, trade_count)
+                           balance, trades, trade_count, cooldown_skips=cooldown_skips,
+                           adx_skips=adx_skips, adx_skip_events=adx_skip_events,
+                           ema_unconfirm_count=ema_unconfirm_count)
     return result
 
 
@@ -864,7 +1024,8 @@ def _no_trade_result(target_date, df_5m_all, df_1d_all, note=""):
     return result
 
 
-def _build_result(target_date, nifty_day, prev_close, daily_pnl, balance, trades, trade_count):
+def _build_result(target_date, nifty_day, prev_close, daily_pnl, balance, trades, trade_count,
+                  cooldown_skips=0, adx_skips=0, adx_skip_events=None, ema_unconfirm_count=0):
     day_open  = float(nifty_day.iloc[0]["Open"])
     day_high  = float(nifty_day["High"].max())
     day_low   = float(nifty_day["Low"].min())
@@ -875,6 +1036,10 @@ def _build_result(target_date, nifty_day, prev_close, daily_pnl, balance, trades
         "final_balance" : round(balance, 2),
         "trade_count"   : trade_count,
         "win_count"     : sum(1 for t in trades if t["pnl"] > 0 and t["reason"] != "PARTIAL_TP"),
+        "cooldown_skips": cooldown_skips,
+        "adx_skips"     : adx_skips,
+        "adx_skip_events": adx_skip_events or [],
+        "ema_unconfirm_count": ema_unconfirm_count,
         "trades"        : trades,
         "market"        : {
             "open": round(day_open, 2), "high": round(day_high, 2),

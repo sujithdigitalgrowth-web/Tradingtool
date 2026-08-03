@@ -27,6 +27,22 @@ def _today() -> date:
     """Today's date in IST."""
     return datetime.now(_IST).date()
 
+def _trim_forming_candle(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Angel's intraday API includes the still-forming 5m candle (Close = latest
+    LTP) when queried mid-candle, unlike backtest.py which only ever sees
+    fully-closed bars. Drop that last row so EMA/RSI/Supertrend and the
+    EMA_EXIT check react to a confirmed candle close, not live tick noise.
+    """
+    if df is None or df.empty:
+        return df
+    last_start = df.index[-1]
+    if last_start.tzinfo is not None:
+        last_start = last_start.tz_localize(None)
+    if last_start + timedelta(minutes=5) > _now():
+        return df.iloc[:-1]
+    return df
+
 # ── Telegram alerts ───────────────────────────────────────────────
 _TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 _TG_CHAT  = os.getenv("TELEGRAM_CHAT_ID",   "")
@@ -291,7 +307,7 @@ class AngelTrader:
         # Underlying EMA9 reference — kept fresh even while a position is
         # open, so _manage_position can check EMA_EXIT (backtest.py's
         # dominant exit mechanism, ported here to match validated results).
-        self._ema_ref = {"close": None, "ema9": None}
+        self._ema_ref = {"close": None, "ema9": None, "ts": None}
 
         # Daily (prev-close) data never changes intraday — cache per day
         # instead of re-hitting Angel One's historical API every ~2 minutes.
@@ -302,6 +318,9 @@ class AngelTrader:
         self.lots         = 1
         self.enabled      = False
         self.paper_mode   = False   # True = simulate orders, no real API calls
+        self.max_daily_loss       = bt.MAX_DAILY_LOSS        # e.g. -8000; block entries once breached
+        self.daily_profit_target  = bt.DAILY_PROFIT_TARGET   # e.g. 6000; block entries once hit
+        self.loss_cooldown_candles = bt.V2_LOSS_COOLDOWN_CANDLES  # 0 disables
 
         # Daily state
         self.position     = _empty_pos()
@@ -310,6 +329,9 @@ class AngelTrader:
         self.win_count    = 0
         self.trade_count  = 0
         self.last_signal  = None   # "buy" | "sell"  dedup
+        self._daily_cap_logged   = False   # so the daily-cap Telegram alert fires once/day
+        self._cooldown_remaining = {"buy": 0, "sell": 0}  # closed candles left before re-entry allowed
+        self._cooldown_last_ts   = None    # last candle timestamp we decremented cooldowns for
 
         # Signal info for display
         self.sig_info     = {"signal": None, "vix": None,
@@ -427,11 +449,11 @@ class AngelTrader:
         today    = _today()
         lookback = today - timedelta(days=12)
 
-        df_nbees = _fetch_intraday(self._auth, self._api_key,
-                                   NIFTYBEES_TOKEN, lookback, today)
+        df_nbees = _trim_forming_candle(_fetch_intraday(self._auth, self._api_key,
+                                   NIFTYBEES_TOKEN, lookback, today))
         time.sleep(1)   # space out Angel One historical-API calls — avoid rate-limit throttling
-        df_bnf   = _fetch_intraday(self._auth, self._api_key,
-                                   BANKBEES_TOKEN, lookback, today)
+        df_bnf   = _trim_forming_candle(_fetch_intraday(self._auth, self._api_key,
+                                   BANKBEES_TOKEN, lookback, today))
 
         # Daily (prev-close) data never changes intraday — fetch once per day
         # and cache, instead of re-hitting the API every ~2-minute cycle.
@@ -479,7 +501,7 @@ class AngelTrader:
         """
         today    = _today()
         lookback = today - timedelta(days=12)
-        return _fetch_intraday(self._auth, self._api_key, NIFTYBEES_TOKEN, lookback, today)
+        return _trim_forming_candle(_fetch_intraday(self._auth, self._api_key, NIFTYBEES_TOKEN, lookback, today))
 
     # ── Signal detection (mirrors backtest V2 logic exactly) ─────
 
@@ -499,7 +521,8 @@ class AngelTrader:
             if sday.empty:
                 return
             ema_f = all_5m["Close"].ewm(span=bt.V2_EMA_FAST, adjust=False).mean().loc[sday.index]
-            self._ema_ref = {"close": float(sday.iloc[-1]["Close"]), "ema9": float(ema_f.iloc[-1])}
+            self._ema_ref = {"close": float(sday.iloc[-1]["Close"]), "ema9": float(ema_f.iloc[-1]),
+                             "ts": sday.index[-1]}
         except Exception as e:
             logger.warning(f"EMA ref update failed: {e}")
 
@@ -537,6 +560,16 @@ class AngelTrader:
             self.sig_info["filter_reason"] = "No candles for today yet"
             return None, vix_val
 
+        # Loss cooldown: decrement remaining-candle counters once per newly
+        # observed closed candle (not once per poll, which can be more frequent).
+        if self.loss_cooldown_candles > 0:
+            cur_candle_ts = sday.index[-1]
+            if cur_candle_ts != self._cooldown_last_ts:
+                for _d in ("buy", "sell"):
+                    if self._cooldown_remaining[_d] > 0:
+                        self._cooldown_remaining[_d] -= 1
+                self._cooldown_last_ts = cur_candle_ts
+
         # Time window check — Tuesday (expiry): morning only, afternoon blocked (theta decay)
         ts            = now.strftime("%H:%M")
         is_expiry_day = today.weekday() == bt.V2_EXPIRY_WEEKDAY
@@ -572,6 +605,7 @@ class AngelTrader:
         ema_s   = all_5m["Close"].ewm(span=bt.V2_EMA_SLOW, adjust=False).mean().loc[sday.index]
         rsi_s   = bt._rsi(all_5m["Close"], bt.V2_RSI_PERIOD).loc[sday.index]
         st_s    = bt._supertrend(all_5m, bt.V2_ST_PERIOD, bt.V2_ST_MULT).loc[sday.index]
+        adx_s   = bt._adx(all_5m, bt.V2_ADX_PERIOD).loc[sday.index]
 
         bnf_day  = (df_bnf[df_bnf.index.date == today].between_time("09:15", "15:30")
                     if df_bnf is not None and not df_bnf.empty
@@ -588,6 +622,7 @@ class AngelTrader:
         vm  = float(vol_ma.iloc[i]) if not np.isnan(vol_ma.iloc[i]) else 0.0
         rsi = float(rsi_s.iloc[i])  if not np.isnan(rsi_s.iloc[i])  else 50.0
         st  = int(st_s.iloc[i])
+        adx = float(adx_s.iloc[i])  if not np.isnan(adx_s.iloc[i])  else 0.0
 
         if has_bnf and bnf_vwap is not None and len(bnf_day) > i:
             bnf_cl   = float(bnf_day.iloc[i]["Close"])
@@ -604,6 +639,18 @@ class AngelTrader:
         raw_sell = (cl < vw and cl < ef and cl < es and cl < op
                     and rsi < bt.V2_RSI_MAX_PE and bnf_bear and st == -1)
 
+        # ADX regime filter: only enter when the market is actually trending
+        # (ADX > V2_ADX_MIN) — skips choppy/range-bound conditions where the
+        # other 7 conditions can still align by noise.
+        adx_blocked = adx <= bt.V2_ADX_MIN and (raw_buy or raw_sell)
+        if adx_blocked:
+            if raw_buy:
+                logger.info(f"Signal check: BUY_CE suppressed — ADX {adx:.1f} <= {bt.V2_ADX_MIN} (choppy regime)")
+            if raw_sell:
+                logger.info(f"Signal check: BUY_PE suppressed — ADX {adx:.1f} <= {bt.V2_ADX_MIN} (choppy regime)")
+            raw_buy  = False
+            raw_sell = False
+
         # Move-from-open filter: skip if the bulk of the move already happened
         day_open_s = float(sday.iloc[0]["Open"]) if not sday.empty else 0.0
         if day_open_s > 0 and bt.V2_MAX_FROM_OPEN_PCT > 0:
@@ -614,16 +661,37 @@ class AngelTrader:
                 self.sig_info["filter_reason"] = f"Move filter: already down {(day_open_s-cl)/day_open_s*100:.2f}% from open"
                 raw_sell = False
 
+        # Loss cooldown: after a losing exit, block re-entry in that same
+        # direction for loss_cooldown_candles closed candles (0 = disabled).
+        cooldown_block_buy  = self.loss_cooldown_candles > 0 and self._cooldown_remaining["buy"]  > 0
+        cooldown_block_sell = self.loss_cooldown_candles > 0 and self._cooldown_remaining["sell"] > 0
+        if raw_buy and cooldown_block_buy:
+            logger.info(f"Signal check: BUY_CE suppressed — loss cooldown "
+                        f"({self._cooldown_remaining['buy']} candle(s) remaining)")
+            raw_buy = False
+        if raw_sell and cooldown_block_sell:
+            logger.info(f"Signal check: BUY_PE suppressed — loss cooldown "
+                        f"({self._cooldown_remaining['sell']} candle(s) remaining)")
+            raw_sell = False
+
         # Build human-readable reason for dashboard when no signal fires
         if not raw_buy and not raw_sell:
-            reasons = []
-            if not (cl > vw):      reasons.append(f"Close({cl:.2f})<VWAP({vw:.2f})")
-            if not (cl > ef):      reasons.append(f"Close<EMA9({ef:.2f})")
-            if not (cl > es):      reasons.append(f"Close<EMA20({es:.2f})")
-            if rsi <= bt.V2_RSI_MIN_CE and rsi >= bt.V2_RSI_MAX_PE:
-                reasons.append(f"RSI({rsi:.0f}) neutral")
-            if st != 1 and st != -1:  reasons.append("ST neutral")
-            self.sig_info["filter_reason"] = ", ".join(reasons) if reasons else "Conditions not met"
+            if cooldown_block_buy or cooldown_block_sell:
+                sides = []
+                if cooldown_block_buy:  sides.append(f"CE ({self._cooldown_remaining['buy']} left)")
+                if cooldown_block_sell: sides.append(f"PE ({self._cooldown_remaining['sell']} left)")
+                self.sig_info["filter_reason"] = "Loss cooldown active — " + ", ".join(sides)
+            elif adx_blocked:
+                self.sig_info["filter_reason"] = f"ADX {adx:.1f} <= {bt.V2_ADX_MIN} (choppy regime)"
+            else:
+                reasons = []
+                if not (cl > vw):      reasons.append(f"Close({cl:.2f})<VWAP({vw:.2f})")
+                if not (cl > ef):      reasons.append(f"Close<EMA9({ef:.2f})")
+                if not (cl > es):      reasons.append(f"Close<EMA20({es:.2f})")
+                if rsi <= bt.V2_RSI_MIN_CE and rsi >= bt.V2_RSI_MAX_PE:
+                    reasons.append(f"RSI({rsi:.0f}) neutral")
+                if st != 1 and st != -1:  reasons.append("ST neutral")
+                self.sig_info["filter_reason"] = ", ".join(reasons) if reasons else "Conditions not met"
 
         signal = None
         if raw_buy  and self.last_signal != "buy":
@@ -716,19 +784,51 @@ class AngelTrader:
             logger.error(self.last_error)
             return False
 
-        # Balance check — required capital = full premium (options buying, no margin)
+        # Balance check — required capital = full premium (options buying, no margin).
+        # If the configured lot count doesn't fit, scale down to whatever whole
+        # number of lots the available cash covers instead of skipping outright.
         required = round(entry_ltp * qty, 2)
         if not self.paper_mode and self.balance > 0 and required > self.balance:
-            msg = (f"Insufficient balance: need ₹{required:,.0f}, "
-                   f"available ₹{self.balance:,.0f} — skipping {symbol}")
-            logger.warning(msg)
-            self.last_error = msg
-            _tg(f"⚠️ <b>Trade Skipped — Low Balance</b>\n"
-                f"Need   : ₹{required:,.0f}\n"
-                f"Available: ₹{self.balance:,.0f}\n"
-                f"Symbol : {symbol}\n"
-                f"Time   : {_now().strftime('%H:%M:%S')}")
-            return False
+            affordable_lots = int(self.balance // (entry_ltp * bt.LOT_SIZE))
+            if affordable_lots < 1:
+                # Even 1 lot of the ATM strike doesn't fit — walk further OTM
+                # (same side, same expiry; premium drops the further OTM you go)
+                # instead of skipping the trade outright.
+                otm_step = 50 if opt_type == "CE" else -50
+                switched = False
+                for i in range(1, 11):  # scan up to 500 pts further OTM
+                    alt_strike = strike + otm_step * i
+                    alt_token, alt_symbol = _find_option(self._scrip, alt_strike, opt_type, expiry)
+                    if not alt_token:
+                        continue
+                    alt_ltp = self.get_option_ltp(alt_symbol, alt_token)
+                    if not alt_ltp or alt_ltp * bt.LOT_SIZE > self.balance:
+                        continue
+                    logger.info(f"ATM {symbol}@{entry_ltp} too expensive for balance "
+                                f"₹{self.balance:,.0f} — switching to further OTM "
+                                f"{alt_symbol}@{alt_ltp}")
+                    strike, token, symbol, entry_ltp = alt_strike, alt_token, alt_symbol, alt_ltp
+                    qty      = bt.LOT_SIZE
+                    required = round(entry_ltp * qty, 2)
+                    switched = True
+                    break
+                if not switched:
+                    msg = (f"Insufficient balance: need ₹{entry_ltp * bt.LOT_SIZE:,.0f} for 1 lot, "
+                           f"available ₹{self.balance:,.0f} — no cheaper OTM strike found either — "
+                           f"skipping {symbol}")
+                    logger.warning(msg)
+                    self.last_error = msg
+                    _tg(f"⚠️ <b>Trade Skipped — Low Balance</b>\n"
+                        f"Need   : ₹{entry_ltp * bt.LOT_SIZE:,.0f} (1 lot)\n"
+                        f"Available: ₹{self.balance:,.0f}\n"
+                        f"Symbol : {symbol}\n"
+                        f"Time   : {_now().strftime('%H:%M:%S')}")
+                    return False
+            else:
+                logger.info(f"Scaling entry down: {qty // bt.LOT_SIZE} lot(s) -> {affordable_lots} lot(s) "
+                            f"to fit available balance ₹{self.balance:,.0f}")
+                qty      = affordable_lots * bt.LOT_SIZE
+                required = round(entry_ltp * qty, 2)
 
         if self.paper_mode:
             order_id = "PAPER"
@@ -781,6 +881,12 @@ class AngelTrader:
                 "live_pnl"     : 0.0,
                 "order_id"     : order_id,
                 "paper"        : self.paper_mode,
+                "realized_pnl" : 0.0,
+                "sl_warn_count"     : 0,   # consecutive polls in premium backstop zone
+                "spot_sl_warn_count": 0,   # consecutive polls with spot beyond SL threshold
+                "ema_warn_count"    : 0,     # consecutive CLOSED candles crossed back through EMA9
+                "ema_last_candle_ts": None,  # candle timestamp last counted, so polls within the
+                                             # same closed candle don't re-increment ema_warn_count
             }
             self.last_signal = "buy" if signal == "BUY_CE" else "sell"
 
@@ -863,6 +969,7 @@ class AngelTrader:
             "reason"    : reason,
             "paper"     : self.paper_mode,
         }
+        total_trade_pnl = pos.get("realized_pnl", 0.0) + pnl
         with self._lock:
             self.trades.append(trade_record)
             self.daily_pnl   += pnl
@@ -871,6 +978,13 @@ class AngelTrader:
                 self.win_count += 1
             self.position  = _empty_pos()
             self.last_signal = None
+            if self.loss_cooldown_candles > 0 and total_trade_pnl < 0:
+                direction = "buy" if pos["side"] == "CE" else "sell"
+                self._cooldown_remaining[direction] = self.loss_cooldown_candles
+
+        if self.loss_cooldown_candles > 0 and total_trade_pnl < 0:
+            logger.warning(f"Loss cooldown: blocking new {pos['side']} entries for "
+                           f"{self.loss_cooldown_candles} closed candle(s) (trade pnl=₹{total_trade_pnl:,.2f})")
 
         _append_trade_log(trade_record)
 
@@ -922,6 +1036,7 @@ class AngelTrader:
             self.daily_pnl         += pnl
             self.position["qty"]   -= qty
             self.position["partial_done"] = True
+            self.position["realized_pnl"] = self.position.get("realized_pnl", 0.0) + pnl
 
         _append_trade_log(partial_record)
 
@@ -1058,6 +1173,8 @@ class AngelTrader:
         # Large breach (HARD pts): genuine reversal — exit immediately, no wait.
         current_spot = self.get_nifty_ltp()
         entry_spot   = pos.get("entry_spot", 0.0)
+        spot_move    = None   # populated below; read later by the EMA-confirm backstop check
+        against      = False
         if current_spot and entry_spot:
             spot_move = abs(current_spot - entry_spot)
             against   = ((pos["side"] == "PE" and current_spot > entry_spot) or
@@ -1098,18 +1215,44 @@ class AngelTrader:
             with self._lock:
                 self.position["sl_warn_count"] = 0
 
-        # EMA9 exit: underlying closed back through EMA9 against the position.
-        # Ported from backtest.py — was the dominant exit mechanism behind the
-        # validated no-cap trailing result (most trades exit here, not via SL).
+        # EMA9 exit: underlying closed back through EMA9 against the position,
+        # confirmed over bt.V2_EMA_EXIT_CONFIRM_CANDLES consecutive CLOSED
+        # candles (matches backtest.py's ema_exit_confirm mechanism). A candle
+        # that moves back in the position's favor resets the counter to 0 —
+        # this is a streak, not a rolling window. Counted once per newly
+        # closed candle (via the "ts" on self._ema_ref), not once per poll —
+        # _manage_position runs every 5s but the underlying candle only
+        # advances once every 5 minutes.
         ema_exit = False
-        if self._ema_ref.get("ema9") is not None:
-            ema_exit = ((pos["side"] == "CE" and self._ema_ref["close"] < self._ema_ref["ema9"]) or
-                        (pos["side"] == "PE" and self._ema_ref["close"] > self._ema_ref["ema9"]))
+        ema_ts   = self._ema_ref.get("ts")
+        if self._ema_ref.get("ema9") is not None and ema_ts is not None:
+            ema_breach = ((pos["side"] == "CE" and self._ema_ref["close"] < self._ema_ref["ema9"]) or
+                          (pos["side"] == "PE" and self._ema_ref["close"] > self._ema_ref["ema9"]))
+            if ema_ts != pos.get("ema_last_candle_ts"):
+                with self._lock:
+                    self.position["ema_warn_count"] = (pos.get("ema_warn_count", 0) + 1) if ema_breach else 0
+                    self.position["ema_last_candle_ts"] = ema_ts
+            ema_exit = pos.get("ema_warn_count", 0) >= bt.V2_EMA_EXIT_CONFIRM_CANDLES
+
+        # EMA-confirm hard backstop: while inside the confirm waiting window
+        # (breach counter > 0 but hasn't reached V2_EMA_EXIT_CONFIRM_CANDLES
+        # yet), a fast adverse spot move overrides the wait and exits
+        # immediately — checked every 5s poll via the same live spot read
+        # above, since the whole point is reacting faster than a candle close.
+        ema_warn_count = pos.get("ema_warn_count", 0)
+        ema_backstop = (bt.V2_EMA_CONFIRM_BACKSTOP_PTS > 0
+                        and 0 < ema_warn_count < bt.V2_EMA_EXIT_CONFIRM_CANDLES
+                        and against and spot_move is not None
+                        and spot_move > bt.V2_EMA_CONFIRM_BACKSTOP_PTS)
+        if ema_backstop:
+            logger.info(f"EMA-confirm backstop: spot moved {spot_move:.1f}pts against {pos['side']} "
+                       f"while awaiting confirmation ({ema_warn_count}/{bt.V2_EMA_EXIT_CONFIRM_CANDLES})")
 
         if   opt_pct >= bt.V2_TP_OPTION_PCT and not is_one_lot: self._exit("TARGET",     ltp)
         elif sl_triggered:                                       self._exit("SL",         ltp)
         elif trail_exit:                                         self._exit("TRAIL_EXIT", ltp)
         elif ema_exit:                                           self._exit("EMA_EXIT",   ltp)
+        elif ema_backstop:                                       self._exit("EMA_EXIT_BACKSTOP", ltp)
 
     # ── Background loops ──────────────────────────────────────────
 
@@ -1137,34 +1280,52 @@ class AngelTrader:
                     next_t = _next_candle(now)
                     self.sig_info["time"]       = now.strftime("%H:%M:%S")
                     self.sig_info["next_check"] = next_t.strftime("%H:%M")
-                    try:
-                        self.get_balance()
-                        self.get_nifty_ltp()
-                        df_nbees, df_1d, df_bnf, df_vix = self._fetch_live_data()
-                        signal, vix = self._check_signal(df_nbees, df_1d, df_bnf, df_vix)
 
-                        self.sig_info.update({"signal": signal, "vix": vix})
-                        self.last_error = None  # clear old errors on success
-
-                        if signal:
-                            logger.info(f"Signal: {signal}")
-                            self._enter(signal)
-                    except Exception as e:
-                        logger.error(f"Signal check error: {e}", exc_info=True)
-                        self.last_error = str(e)
-                        self._consec_errors += 1
-                        # Alert after 3 consecutive failures, then at most once per 10 min
-                        now_dt = _now()
-                        quiet  = (self._last_error_tg is not None and
-                                  (now_dt - self._last_error_tg).total_seconds() < 600)
-                        if self._consec_errors >= 3 and not quiet:
-                            _tg(f"⚠️ <b>Signal Check Error (×{self._consec_errors})</b>\n"
-                                f"Error : {e}\n"
-                                f"Time  : {now_dt.strftime('%H:%M:%S')}\n"
-                                f"Action: Bot is retrying — check Angel One API / network.")
-                            self._last_error_tg = now_dt
+                    # Daily loss cap / profit lock — ported from backtest.py's
+                    # entry gate (MAX_DAILY_LOSS / DAILY_PROFIT_TARGET), which
+                    # was never enforced live before this check existed.
+                    daily_cap_hit    = self.daily_pnl <= self.max_daily_loss
+                    daily_target_hit = self.daily_pnl >= self.daily_profit_target
+                    if daily_cap_hit or daily_target_hit:
+                        reason = (f"Daily loss cap hit (₹{self.daily_pnl:,.2f} ≤ ₹{self.max_daily_loss:,.2f}) "
+                                  f"— no new entries today" if daily_cap_hit else
+                                  f"Daily profit target reached (₹{self.daily_pnl:,.2f} ≥ "
+                                  f"₹{self.daily_profit_target:,.2f}) — locked in, no new entries")
+                        self.sig_info["filter_reason"] = reason
+                        if not self._daily_cap_logged:
+                            logger.warning(reason)
+                            _tg(f"🛑 <b>Trading Halted For Today</b>\n{reason}\n"
+                                f"Time: {_now().strftime('%H:%M:%S')}")
+                            self._daily_cap_logged = True
                     else:
-                        self._consec_errors = 0   # reset on success
+                        try:
+                            self.get_balance()
+                            self.get_nifty_ltp()
+                            df_nbees, df_1d, df_bnf, df_vix = self._fetch_live_data()
+                            signal, vix = self._check_signal(df_nbees, df_1d, df_bnf, df_vix)
+
+                            self.sig_info.update({"signal": signal, "vix": vix})
+                            self.last_error = None  # clear old errors on success
+
+                            if signal:
+                                logger.info(f"Signal: {signal}")
+                                self._enter(signal)
+                        except Exception as e:
+                            logger.error(f"Signal check error: {e}", exc_info=True)
+                            self.last_error = str(e)
+                            self._consec_errors += 1
+                            # Alert after 3 consecutive failures, then at most once per 10 min
+                            now_dt = _now()
+                            quiet  = (self._last_error_tg is not None and
+                                      (now_dt - self._last_error_tg).total_seconds() < 600)
+                            if self._consec_errors >= 3 and not quiet:
+                                _tg(f"⚠️ <b>Signal Check Error (×{self._consec_errors})</b>\n"
+                                    f"Error : {e}\n"
+                                    f"Time  : {now_dt.strftime('%H:%M:%S')}\n"
+                                    f"Action: Bot is retrying — check Angel One API / network.")
+                                self._last_error_tg = now_dt
+                        else:
+                            self._consec_errors = 0   # reset on success
                 elif self.position["active"]:
                     # Position open — full signal check is skipped, but keep the
                     # underlying's EMA9 reference fresh so _manage_position's
@@ -1205,7 +1366,8 @@ class AngelTrader:
 
     # ── Public API ────────────────────────────────────────────────
 
-    def start(self, max_trades: int = 2, lots: int = 1, paper_mode: bool = False):
+    def start(self, max_trades: int = 2, lots: int = 1, paper_mode: bool = False,
+             max_daily_loss: float = None, daily_profit_target: float = None):
         """Enable trading and launch background threads."""
         if self._obj is None:
             self.login()
@@ -1213,6 +1375,9 @@ class AngelTrader:
         self.max_trades       = max_trades
         self.lots             = lots
         self.paper_mode       = paper_mode
+        self.max_daily_loss   = max_daily_loss if max_daily_loss is not None else bt.MAX_DAILY_LOSS
+        self.daily_profit_target = (daily_profit_target if daily_profit_target is not None
+                                    else bt.DAILY_PROFIT_TARGET)
         self.enabled          = True
         self._monitoring_only = False
 
@@ -1226,11 +1391,13 @@ class AngelTrader:
             self._mon_thread.start()
 
         self._save_state()
-        logger.info(f"Trading started: {lots} lot(s), max {max_trades} trades/day")
+        logger.info(f"Trading started: {lots} lot(s), max {max_trades} trades/day, "
+                    f"daily loss cap ₹{self.max_daily_loss:,.0f}, profit target ₹{self.daily_profit_target:,.0f}")
         tag = "[PAPER] " if paper_mode else ""
         _tg(f"🚀 <b>{tag}Bot Started</b>\n"
             f"Lots   : {lots}\n"
             f"Max    : {max_trades} trades/day\n"
+            f"Daily cap: ₹{self.max_daily_loss:,.0f} loss / ₹{self.daily_profit_target:,.0f} profit\n"
             f"Time   : {_now().strftime('%H:%M:%S IST')}")
 
     def stop(self):
@@ -1313,6 +1480,9 @@ class AngelTrader:
             self.win_count   = 0
             self.trade_count = 0
             self.last_signal = None
+            self._daily_cap_logged   = False
+            self._cooldown_remaining = {"buy": 0, "sell": 0}
+            self._cooldown_last_ts   = None
         _setup_logfile()
         logger.info("Daily state reset")
 
@@ -1343,6 +1513,9 @@ def _empty_pos():
         "order_id"          : None,
         "sl_warn_count"     : 0,   # consecutive polls in premium backstop zone
         "spot_sl_warn_count": 0,   # consecutive polls with spot beyond SL threshold
+        "realized_pnl"      : 0.0,  # running pnl for this trade cycle (partial + final)
+        "ema_warn_count"    : 0,     # consecutive CLOSED candles crossed back through EMA9
+        "ema_last_candle_ts": None,  # candle timestamp last counted for ema_warn_count
     }
 
 def _market_open(now: datetime) -> bool:

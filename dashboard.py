@@ -1,6 +1,7 @@
 import json, os, threading, requests as _requests
 from flask import Flask, render_template_string, jsonify, request
 from datetime import datetime, date, timedelta
+import backtest as bt
 
 def _tg(msg: str):
     token = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -47,10 +48,13 @@ def _init_trader():
         # Auto-resume trading if it was active before the server restarted
         cfg = load_json(TRADING_CONFIG_FILE)
         if cfg.get("active"):
-            max_trades = int(cfg.get("max_trades", 2))
-            lots       = int(cfg.get("lots", 1))
-            paper      = bool(cfg.get("paper", False))
-            t.start(max_trades=max_trades, lots=lots, paper_mode=paper)
+            max_trades          = int(cfg.get("max_trades", 2))
+            lots                = int(cfg.get("lots", 1))
+            paper               = bool(cfg.get("paper", False))
+            max_daily_loss      = float(cfg.get("max_daily_loss", bt.MAX_DAILY_LOSS))
+            daily_profit_target = float(cfg.get("daily_profit_target", bt.DAILY_PROFIT_TARGET))
+            t.start(max_trades=max_trades, lots=lots, paper_mode=paper,
+                   max_daily_loss=max_daily_loss, daily_profit_target=daily_profit_target)
             from logzero import logger
             logger.info(f"Auto-resumed trading: {lots} lot(s), max {max_trades} trades, paper={paper}")
             mode = "📋 PAPER" if paper else "🟢 LIVE"
@@ -85,10 +89,12 @@ def load_json(path):
 def _get_trading_config():
     cfg = load_json(TRADING_CONFIG_FILE)
     return {
-        "max_trades": int(cfg.get("max_trades", 2)),
-        "lots":       int(cfg.get("lots", 1)),
-        "paper":      bool(cfg.get("paper", True)),
-        "active":     bool(cfg.get("active", False)),
+        "max_trades":          int(cfg.get("max_trades", 2)),
+        "lots":                int(cfg.get("lots", 1)),
+        "paper":               bool(cfg.get("paper", True)),
+        "active":              bool(cfg.get("active", False)),
+        "max_daily_loss":      float(cfg.get("max_daily_loss", bt.MAX_DAILY_LOSS)),
+        "daily_profit_target": float(cfg.get("daily_profit_target", bt.DAILY_PROFIT_TARGET)),
     }
 
 def _save_trading_config(cfg):
@@ -131,16 +137,20 @@ def api_live_state():
 
 @app.route("/api/start-trading", methods=["POST"])
 def api_start_trading():
-    body       = request.json or {}
-    max_trades = max(1, min(6, int(body.get("max_trades", 2))))
-    lots       = max(1, min(20, int(body.get("lots", 1))))
-    paper      = bool(body.get("paper", False))
+    body                = request.json or {}
+    max_trades          = max(1, min(6, int(body.get("max_trades", 2))))
+    lots                = max(1, min(20, int(body.get("lots", 1))))
+    paper               = bool(body.get("paper", False))
+    max_daily_loss      = min(-500, max(-50000, float(body.get("max_daily_loss", bt.MAX_DAILY_LOSS))))
+    daily_profit_target = max(500, min(50000, float(body.get("daily_profit_target", bt.DAILY_PROFIT_TARGET))))
     try:
         t = get_trader()
-        t.start(max_trades=max_trades, lots=lots, paper_mode=paper)
-        _save_trading_config({"max_trades": max_trades, "lots": lots,
-                              "paper": paper, "active": True})
-        return jsonify({"status": "started", "max_trades": max_trades, "lots": lots, "paper": paper})
+        t.start(max_trades=max_trades, lots=lots, paper_mode=paper,
+               max_daily_loss=max_daily_loss, daily_profit_target=daily_profit_target)
+        _save_trading_config({"max_trades": max_trades, "lots": lots, "paper": paper, "active": True,
+                              "max_daily_loss": max_daily_loss, "daily_profit_target": daily_profit_target})
+        return jsonify({"status": "started", "max_trades": max_trades, "lots": lots, "paper": paper,
+                        "max_daily_loss": max_daily_loss, "daily_profit_target": daily_profit_target})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -242,12 +252,15 @@ def api_get_config():
 
 @app.route("/api/trading-config", methods=["POST"])
 def api_set_config():
-    body       = request.json or {}
-    max_trades = max(1, min(6, int(body.get("max_trades", 2))))
-    lots       = max(1, min(20, int(body.get("lots", 1))))
-    existing   = _get_trading_config()
+    body                = request.json or {}
+    max_trades          = max(1, min(6, int(body.get("max_trades", 2))))
+    lots                = max(1, min(20, int(body.get("lots", 1))))
+    existing            = _get_trading_config()
+    max_daily_loss      = min(-500, max(-50000, float(body.get("max_daily_loss", existing["max_daily_loss"]))))
+    daily_profit_target = max(500, min(50000, float(body.get("daily_profit_target", existing["daily_profit_target"]))))
     cfg = {"max_trades": max_trades, "lots": lots,
-           "paper": existing.get("paper", True), "active": existing.get("active", False)}
+           "paper": existing.get("paper", True), "active": existing.get("active", False),
+           "max_daily_loss": max_daily_loss, "daily_profit_target": daily_profit_target}
     _save_trading_config(cfg)
     return jsonify(cfg)
 
