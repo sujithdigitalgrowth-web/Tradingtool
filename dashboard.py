@@ -1188,7 +1188,7 @@ function testTrade(){
   if(!confirm('Place a REAL CE order on Angel One and auto-exit in 5 seconds?\n\nThis is for connectivity testing only — a real order will be placed.')) return;
   const btn=document.getElementById('btn-test');
   btn.disabled=true; btn.textContent='Placing…';
-  fetch('/api/test-trade',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({strike:23800})})
+  fetch('/api/test-trade',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})})
     .then(r=>r.json())
     .then(d=>{
       btn.disabled=false; btn.textContent='⚡ Test Trade';
