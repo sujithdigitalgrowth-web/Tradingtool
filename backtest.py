@@ -40,6 +40,11 @@ V2_LOSS_COOLDOWN_CANDLES = 3   # after a losing exit, block new entries in that 
 V2_EMA_EXIT_CONFIRM_CANDLES = 2   # consecutive closed candles crossed back through EMA9
                                     # required before EMA_EXIT fires (1 = old instant behavior)
 
+# ── Strategy 6 (Supertrend directional follower) constants ─────────
+ST6_PERIOD   = 10    # Supertrend period
+ST6_MULT     = 3.0   # Supertrend multiplier
+ST6_SPOT_SL  = 50     # points adverse spot move -> immediate stop, no confirmation
+
 # ── V2 Strategy constants ─────────────────────────────────────────
 V2_TP_OPTION_PCT   = 0.20   # 2-lot: remaining lot hard TP at +20%
 V2_SL_OPTION_PCT   = 0.20   # premium hard stop — immediate exit, no confirmation needed

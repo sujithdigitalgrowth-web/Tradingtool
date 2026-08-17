@@ -53,12 +53,16 @@ def _init_trader():
             paper               = bool(cfg.get("paper", False))
             max_daily_loss      = float(cfg.get("max_daily_loss", bt.MAX_DAILY_LOSS))
             daily_profit_target = float(cfg.get("daily_profit_target", bt.DAILY_PROFIT_TARGET))
+            strategy            = cfg.get("strategy", "v2")
             t.start(max_trades=max_trades, lots=lots, paper_mode=paper,
-                   max_daily_loss=max_daily_loss, daily_profit_target=daily_profit_target)
+                   max_daily_loss=max_daily_loss, daily_profit_target=daily_profit_target,
+                   strategy=strategy)
             from logzero import logger
-            logger.info(f"Auto-resumed trading: {lots} lot(s), max {max_trades} trades, paper={paper}")
+            logger.info(f"Auto-resumed trading: strategy={strategy}, {lots} lot(s), "
+                       f"max {max_trades} trades, paper={paper}")
             mode = "📋 PAPER" if paper else "🟢 LIVE"
             _tg(f"🔄 <b>Server Restarted — Trading Auto-Resumed</b>\n"
+                f"Strategy: {strategy}\n"
                 f"Mode   : {mode}\n"
                 f"Lots   : {lots}  |  Max trades: {max_trades}\n"
                 f"Time   : {datetime.now().strftime('%d %b %Y %H:%M:%S')}\n"
@@ -95,6 +99,7 @@ def _get_trading_config():
         "active":              bool(cfg.get("active", False)),
         "max_daily_loss":      float(cfg.get("max_daily_loss", bt.MAX_DAILY_LOSS)),
         "daily_profit_target": float(cfg.get("daily_profit_target", bt.DAILY_PROFIT_TARGET)),
+        "strategy":            cfg.get("strategy", "v2"),
     }
 
 def _save_trading_config(cfg):
@@ -143,14 +148,20 @@ def api_start_trading():
     paper               = bool(body.get("paper", False))
     max_daily_loss      = min(-500, max(-50000, float(body.get("max_daily_loss", bt.MAX_DAILY_LOSS))))
     daily_profit_target = max(500, min(50000, float(body.get("daily_profit_target", bt.DAILY_PROFIT_TARGET))))
+    strategy            = body.get("strategy", "v2")
+    if strategy not in ("v2", "supertrend"):
+        strategy = "v2"
     try:
         t = get_trader()
         t.start(max_trades=max_trades, lots=lots, paper_mode=paper,
-               max_daily_loss=max_daily_loss, daily_profit_target=daily_profit_target)
+               max_daily_loss=max_daily_loss, daily_profit_target=daily_profit_target,
+               strategy=strategy)
         _save_trading_config({"max_trades": max_trades, "lots": lots, "paper": paper, "active": True,
-                              "max_daily_loss": max_daily_loss, "daily_profit_target": daily_profit_target})
+                              "max_daily_loss": max_daily_loss, "daily_profit_target": daily_profit_target,
+                              "strategy": strategy})
         return jsonify({"status": "started", "max_trades": max_trades, "lots": lots, "paper": paper,
-                        "max_daily_loss": max_daily_loss, "daily_profit_target": daily_profit_target})
+                        "max_daily_loss": max_daily_loss, "daily_profit_target": daily_profit_target,
+                        "strategy": strategy})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -260,7 +271,8 @@ def api_set_config():
     daily_profit_target = max(500, min(50000, float(body.get("daily_profit_target", existing["daily_profit_target"]))))
     cfg = {"max_trades": max_trades, "lots": lots,
            "paper": existing.get("paper", True), "active": existing.get("active", False),
-           "max_daily_loss": max_daily_loss, "daily_profit_target": daily_profit_target}
+           "max_daily_loss": max_daily_loss, "daily_profit_target": daily_profit_target,
+           "strategy": existing.get("strategy", "v2")}
     _save_trading_config(cfg)
     return jsonify(cfg)
 
@@ -512,6 +524,7 @@ TEMPLATE = r"""
       <!-- Status badge + info -->
       <div class="flex items-center gap-3">
         <span id="status-badge" class="badge-stop text-xs font-bold px-3 py-1 rounded-full">STOPPED</span>
+        <span id="strategy-badge" class="text-xs font-bold px-3 py-1 rounded-full bg-blue-100 text-blue-700">V2</span>
         <div id="session-info" class="text-xs text-gray-400"></div>
       </div>
       <!-- Buttons -->
@@ -776,6 +789,27 @@ TEMPLATE = r"""
         </div>
       </div>
       <div>
+        <label class="text-sm font-semibold text-gray-700 block mb-2">Strategy</label>
+        <div class="flex gap-3">
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input type="radio" name="m-strategy" id="m-strategy-v2" value="v2" checked
+              class="accent-blue-600"/>
+            <span class="text-sm text-gray-700">
+              <span class="font-semibold text-blue-700">V2</span>
+              <span class="text-xs text-gray-400 ml-1">— multi-filter (VWAP/EMA/RSI/ADX/VIX)</span>
+            </span>
+          </label>
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input type="radio" name="m-strategy" id="m-strategy-supertrend" value="supertrend"
+              class="accent-purple-600"/>
+            <span class="text-sm text-gray-700">
+              <span class="font-semibold text-purple-700">Supertrend</span>
+              <span class="text-xs text-gray-400 ml-1">— (10,3) follower + 50pt SL</span>
+            </span>
+          </label>
+        </div>
+      </div>
+      <div>
         <label class="text-sm font-semibold text-gray-700 block mb-2">Mode</label>
         <div class="flex gap-3">
           <label class="flex items-center gap-2 cursor-pointer">
@@ -987,6 +1021,13 @@ function refreshLive(){
     badge.className   = 'text-xs font-bold px-3 py-1 rounded-full '+
       (status==='LIVE'?'badge-live pulse':status==='PAPER'?'badge-paper pulse':status==='MONITORING'?'badge-mon':'badge-stop');
 
+    // Strategy badge
+    const strategy = (s.config && s.config.strategy) || 'v2';
+    const stBadge  = document.getElementById('strategy-badge');
+    stBadge.textContent = strategy === 'supertrend' ? 'SUPERTREND' : 'V2';
+    stBadge.className   = 'text-xs font-bold px-3 py-1 rounded-full '+
+      (strategy === 'supertrend' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700');
+
     // Buttons
     const isLive  = (status==='LIVE');
     const isPaper = (status==='PAPER');
@@ -1126,6 +1167,9 @@ function openStartModal(){
     const isPaper = cfg.paper !== false; // default to paper
     document.getElementById('m-mode-paper').checked = isPaper;
     document.getElementById('m-mode-live') .checked = !isPaper;
+    const isSupertrend = cfg.strategy === 'supertrend';
+    document.getElementById('m-strategy-v2')        .checked = !isSupertrend;
+    document.getElementById('m-strategy-supertrend').checked = isSupertrend;
     updateModalUnits();
     updateModeWarning();
   }).catch(()=>{});
@@ -1156,11 +1200,12 @@ function confirmStart(){
   const max_trades=parseInt(document.getElementById('m-max-trades').value);
   const lots      =parseInt(document.getElementById('m-lots').value);
   const paper     =document.getElementById('m-mode-paper').checked;
+  const strategy  =document.getElementById('m-strategy-supertrend').checked ? 'supertrend' : 'v2';
   closeModal();
   fetch('/api/start-trading',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({max_trades,lots,paper})
+    body:JSON.stringify({max_trades,lots,paper,strategy})
   }).then(r=>r.json()).then(d=>{
     if(d.error) alert('Error: '+d.error);
     else setTimeout(refreshLive,1000);

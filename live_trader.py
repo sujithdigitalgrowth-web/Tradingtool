@@ -309,11 +309,16 @@ class AngelTrader:
         # dominant exit mechanism, ported here to match validated results).
         self._ema_ref = {"close": None, "ema9": None, "ts": None}
 
+        # Supertrend(10,3) reference for the "supertrend" strategy — mirrors
+        # _ema_ref's role but for Strategy 6's single-indicator flip signal.
+        self._st_ref = {"value": None, "prev": None, "ts": None}
+
         # Daily (prev-close) data never changes intraday — cache per day
         # instead of re-hitting Angel One's historical API every ~2 minutes.
         self._daily_cache = {"date": None, "df": None}
 
         # Config (set by start())
+        self.strategy      = "v2"   # "v2" | "supertrend" — which signal/exit path runs
         self.max_trades   = 2
         self.lots         = 1
         self.enabled      = False
@@ -526,12 +531,59 @@ class AngelTrader:
         except Exception as e:
             logger.warning(f"EMA ref update failed: {e}")
 
+    def _update_st_ref(self, df_nbees):
+        """
+        Refresh the cached Supertrend(10,3) value for the "supertrend" strategy
+        (Strategy 6). Computed on the *entire* continuous multi-day candle
+        series with no daily reset — matches supertrend_45day_sl_backtest.py's
+        core design (the indicator's state carries across the overnight gap;
+        only the position itself is flattened at EOD).
+        """
+        try:
+            if df_nbees is None or df_nbees.empty or not isinstance(df_nbees.index, pd.DatetimeIndex):
+                return
+            all_5m = df_nbees.between_time("09:15", "15:30")
+            if len(all_5m) < bt.ST6_PERIOD + 2:
+                return
+            st_s = bt._supertrend(all_5m, bt.ST6_PERIOD, bt.ST6_MULT)
+            self._st_ref = {
+                "value": int(st_s.iloc[-1]),
+                "prev":  int(st_s.iloc[-2]),
+                "ts":    st_s.index[-1],
+            }
+        except Exception as e:
+            logger.warning(f"Supertrend ref update failed: {e}")
+
+    def _check_signal_supertrend(self, df_nbees):
+        """
+        Strategy 6: Supertrend(10,3) directional follower — single indicator,
+        no confirmation stack (no VIX/time-window/RSI/EMA/BNF/ADX/cooldown).
+        Flip Red(-1)->Green(1) => BUY_CE. Flip Green(1)->Red(-1) => BUY_PE.
+        Matches supertrend_45day_sl_backtest.py exactly.
+        """
+        self._update_st_ref(df_nbees)
+        value, prev = self._st_ref.get("value"), self._st_ref.get("prev")
+        if value is None or prev is None:
+            self.sig_info["filter_reason"] = "Warming up — not enough candles yet"
+            return None
+        if value == 1 and prev == -1:
+            self.sig_info["filter_reason"] = None
+            return "BUY_CE"
+        if value == -1 and prev == 1:
+            self.sig_info["filter_reason"] = None
+            return "BUY_PE"
+        self.sig_info["filter_reason"] = f"Supertrend {'up' if value == 1 else 'down'} — no flip"
+        return None
+
     def _check_signal(self, df_nbees, df_1d, df_bnf, df_vix):
         """
         Run V2 indicator logic on latest closed 5m candle.
         Returns ("BUY_CE" | "BUY_PE" | None, vix_value | None)
         Also updates self.sig_info["filter_reason"] with why no signal fired.
         """
+        if self.strategy == "supertrend":
+            return self._check_signal_supertrend(df_nbees), None
+
         self._update_ema_ref(df_nbees)
         today = _today()
         now   = _now()
@@ -887,6 +939,7 @@ class AngelTrader:
                 "ema_warn_count"    : 0,     # consecutive CLOSED candles crossed back through EMA9
                 "ema_last_candle_ts": None,  # candle timestamp last counted, so polls within the
                                              # same closed candle don't re-increment ema_warn_count
+                "st_last_candle_ts" : None,  # supertrend strategy: candle timestamp last checked
             }
             self.last_signal = "buy" if signal == "BUY_CE" else "sell"
 
@@ -1100,6 +1153,10 @@ class AngelTrader:
             self._exit("EOD_SQUAREOFF")
             return
 
+        if self.strategy == "supertrend":
+            self._manage_position_supertrend(pos)
+            return
+
         tok  = pos["token"]
         tick = self._tick_ltp.get(tok)
         if tick and (time.monotonic() - tick[1]) < _TICK_STALE_SECS:
@@ -1254,6 +1311,44 @@ class AngelTrader:
         elif ema_exit:                                           self._exit("EMA_EXIT",   ltp)
         elif ema_backstop:                                       self._exit("EMA_EXIT_BACKSTOP", ltp)
 
+    def _manage_position_supertrend(self, pos):
+        """
+        Strategy 6 exit logic — matches supertrend_45day_sl_backtest.py:
+        (1) 50-point adverse spot move -> immediate stop, no confirmation;
+        (2) Supertrend flip against the position. EOD square-off is handled
+        by the shared check in _manage_position before this is called.
+        """
+        tok  = pos["token"]
+        tick = self._tick_ltp.get(tok)
+        if tick and (time.monotonic() - tick[1]) < _TICK_STALE_SECS:
+            ltp = tick[0]
+        else:
+            ltp = self.get_option_ltp(pos["symbol"], tok)
+        if ltp is not None:
+            with self._lock:
+                self.position["live_ltp"] = round(ltp, 2)
+                self.position["live_pnl"] = round((ltp - pos["entry_price"]) * pos["qty"], 2)
+
+        current_spot = self.get_nifty_ltp()
+        entry_spot   = pos.get("entry_spot", 0.0)
+        if current_spot and entry_spot:
+            adverse = (entry_spot - current_spot if pos["side"] == "CE"
+                      else current_spot - entry_spot)
+            if adverse >= bt.ST6_SPOT_SL:
+                self._exit("ST_SPOT_SL", ltp)
+                return
+
+        st_ts = self._st_ref.get("ts")
+        if st_ts is not None and st_ts != pos.get("st_last_candle_ts"):
+            with self._lock:
+                self.position["st_last_candle_ts"] = st_ts
+            st_val = self._st_ref.get("value")
+            flip_against = ((pos["side"] == "CE" and st_val == -1) or
+                            (pos["side"] == "PE" and st_val == 1))
+            if flip_against:
+                self._exit("ST_FLIP", ltp)
+                return
+
     # ── Background loops ──────────────────────────────────────────
 
     def _signal_loop(self):
@@ -1328,13 +1423,16 @@ class AngelTrader:
                             self._consec_errors = 0   # reset on success
                 elif self.position["active"]:
                     # Position open — full signal check is skipped, but keep the
-                    # underlying's EMA9 reference fresh so _manage_position's
-                    # EMA_EXIT check has current data to compare against.
+                    # relevant indicator reference fresh so _manage_position's
+                    # exit check has current data to compare against.
                     try:
                         df_nbees = self._fetch_nbees_only()
-                        self._update_ema_ref(df_nbees)
+                        if self.strategy == "supertrend":
+                            self._update_st_ref(df_nbees)
+                        else:
+                            self._update_ema_ref(df_nbees)
                     except Exception as e:
-                        logger.warning(f"EMA ref refresh (position open) failed: {e}")
+                        logger.warning(f"Indicator ref refresh (position open) failed: {e}")
 
                 self._save_state()
 
@@ -1367,17 +1465,24 @@ class AngelTrader:
     # ── Public API ────────────────────────────────────────────────
 
     def start(self, max_trades: int = 2, lots: int = 1, paper_mode: bool = False,
-             max_daily_loss: float = None, daily_profit_target: float = None):
+             max_daily_loss: float = None, daily_profit_target: float = None,
+             strategy: str = "v2"):
         """Enable trading and launch background threads."""
         if self._obj is None:
             self.login()
 
+        self.strategy          = strategy if strategy in ("v2", "supertrend") else "v2"
         self.max_trades       = max_trades
         self.lots             = lots
         self.paper_mode       = paper_mode
         self.max_daily_loss   = max_daily_loss if max_daily_loss is not None else bt.MAX_DAILY_LOSS
         self.daily_profit_target = (daily_profit_target if daily_profit_target is not None
                                     else bt.DAILY_PROFIT_TARGET)
+        # Loss cooldown was never part of what we backtested for the
+        # Supertrend strategy — keep it off there; restore V2's validated
+        # default when running (or switching back to) V2.
+        self.loss_cooldown_candles = (0 if self.strategy == "supertrend"
+                                      else bt.V2_LOSS_COOLDOWN_CANDLES)
         self.enabled          = True
         self._monitoring_only = False
 
@@ -1453,7 +1558,8 @@ class AngelTrader:
             "enabled"     : self.enabled,
             "monitoring"  : self._monitoring_only,
             "paper_mode"  : self.paper_mode,
-            "config"      : {"max_trades": self.max_trades, "lots": self.lots, "paper": self.paper_mode},
+            "config"      : {"max_trades": self.max_trades, "lots": self.lots, "paper": self.paper_mode,
+                             "strategy": self.strategy},
             "market"      : {"nifty_ltp": self.nifty_ltp, "vix": self.sig_info.get("vix")},
             "signal"      : self.sig_info,
             "position"    : pos,
@@ -1516,6 +1622,7 @@ def _empty_pos():
         "realized_pnl"      : 0.0,  # running pnl for this trade cycle (partial + final)
         "ema_warn_count"    : 0,     # consecutive CLOSED candles crossed back through EMA9
         "ema_last_candle_ts": None,  # candle timestamp last counted for ema_warn_count
+        "st_last_candle_ts" : None,  # supertrend strategy: candle timestamp last checked
     }
 
 def _market_open(now: datetime) -> bool:
