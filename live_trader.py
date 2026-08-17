@@ -897,25 +897,25 @@ class AngelTrader:
                     f"Time   : {_now().strftime('%H:%M:%S')}")
                 return False
             order_id = resp.get("data", {}).get("orderid", "—")
-            # Use actual fill price from Angel One tradeBook
+            # Use actual fill price from Angel One tradeBook, matched by exact order ID
+            # (not just symbol/side — the same strike can be bought more than once a day).
             try:
                 import time as _time; _time.sleep(1)
                 tb = self._obj.tradeBook()
-                if tb and tb.get("status") and tb.get("data"):
-                    for row in reversed(tb["data"]):
-                        if (row.get("tradingsymbol") == symbol
-                                and row.get("transactiontype") == "BUY"
-                                and row.get("producttype") == "INTRADAY"):
+                if tb and tb.get("status") and tb.get("data") and order_id != "—":
+                    for row in tb["data"]:
+                        if str(row.get("orderid")) == str(order_id):
                             fill = float(row.get("fillprice") or 0)
                             if fill:
                                 entry_ltp = fill
-                                break
+                            break
             except Exception as e:
                 logger.warning(f"Could not fetch entry fill price: {e}")
 
         with self._lock:
             self.position = {
                 "active"       : True,
+                "exiting"      : False,
                 "symbol"       : symbol,
                 "token"        : token,
                 "side"         : opt_type,
@@ -961,12 +961,10 @@ class AngelTrader:
 
     def _exit(self, reason, ltp=None):
         with self._lock:
-            if not self.position["active"]:
+            if not self.position["active"] or self.position.get("exiting"):
                 return
-            self.position["active"] = False  # claim the exit — prevents duplicate from other thread
-        self._stop_ws_feed()
+            self.position["exiting"] = True  # claim the exit — prevents duplicate from other thread
         pos = dict(self.position)
-        pos["active"] = True  # keep local copy consistent for pnl calc below
 
         if ltp is None:
             ltp = self.get_option_ltp(pos["symbol"], pos["token"]) or pos["entry_price"]
@@ -983,23 +981,29 @@ class AngelTrader:
                     f"Error  : {resp}\n"
                     f"Time   : {_now().strftime('%H:%M:%S')}\n"
                     f"⚠️ Please exit manually on Angel One app!")
+                with self._lock:
+                    # Release the claim — the position is still genuinely open (sell never
+                    # went through), so keep managing it instead of orphaning it as "closed".
+                    self.position["exiting"] = False
                 return
-            # Use actual fill price from Angel One tradeBook instead of LTP estimate
+            sell_order_id = resp.get("data", {}).get("orderid")
+            # Use actual fill price from Angel One tradeBook, matched by exact order ID
+            # instead of symbol/side — the same strike can be bought/sold more than once
+            # in a day, and a plain symbol scan can silently grab an earlier trade's fill.
             try:
                 import time as _time; _time.sleep(1)  # brief wait for fill to settle
                 tb = self._obj.tradeBook()
-                if tb and tb.get("status") and tb.get("data"):
-                    for row in reversed(tb["data"]):
-                        if (row.get("tradingsymbol") == pos["symbol"]
-                                and row.get("transactiontype") == "SELL"
-                                and row.get("producttype") == "INTRADAY"):
+                if tb and tb.get("status") and tb.get("data") and sell_order_id:
+                    for row in tb["data"]:
+                        if str(row.get("orderid")) == str(sell_order_id):
                             fill = float(row.get("fillprice") or 0)
                             if fill:
                                 ltp = fill
-                                break
+                            break
             except Exception as e:
                 logger.warning(f"Could not fetch fill price: {e}")
 
+        self._stop_ws_feed()
         pnl     = round((ltp - pos["entry_price"]) * pos["qty"], 2)
         pnl_pct = round((ltp - pos["entry_price"]) / pos["entry_price"] * 100, 2) if pos["entry_price"] else 0
         lots    = pos["qty"] // bt.LOT_SIZE
@@ -1609,6 +1613,7 @@ class AngelTrader:
 def _empty_pos():
     return {
         "active"       : False,
+        "exiting"      : False,
         "symbol"       : None,  "token"       : None,
         "side"         : None,  "strike"      : 0,
         "expiry"       : None,  "qty"         : 0,
