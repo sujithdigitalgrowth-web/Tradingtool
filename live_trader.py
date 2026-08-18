@@ -4,6 +4,7 @@ Strategy : V2 (VWAP + EMA9/20 + RSI + Volume + BNF + Supertrend + VIX)
 Lot size  : 65 (NSE, effective Oct 28 2025)
 """
 import os, json, time, threading, requests, struct, ssl
+from collections import deque
 import websocket
 import pandas as pd, numpy as np
 from datetime import date, datetime, timedelta, timezone
@@ -349,6 +350,13 @@ class AngelTrader:
         self._today       = _today()
         self._consec_errors   = 0      # consecutive signal-check failures
         self._last_error_tg   = None   # datetime of last error Telegram sent
+
+        # Recent-activity feed for the dashboard — real events only (scans,
+        # entries, exits), newest first, bounded so it can't grow unbounded.
+        self._activity = deque(maxlen=20)
+
+    def _log_activity(self, kind: str, text: str):
+        self._activity.appendleft({"time": _now().strftime("%H:%M"), "kind": kind, "text": text})
 
     # ── Session management ────────────────────────────────────────
 
@@ -946,6 +954,7 @@ class AngelTrader:
         lots = qty // bt.LOT_SIZE
         tag  = "[PAPER] " if self.paper_mode else ""
         logger.info(f"{tag}Position opened: {symbol} {qty}@{entry_ltp}")
+        self._log_activity("entry", f"{tag}BUY {opt_type} — {symbol} @ ₹{entry_ltp:.2f} ({lots} lot{'s' if lots!=1 else ''})")
         _tg(f"{'📋' if self.paper_mode else '🟢'} <b>{tag}TRADE ENTRY</b>\n"
             f"Symbol : {symbol}\n"
             f"Type   : {opt_type}\n"
@@ -1048,6 +1057,9 @@ class AngelTrader:
         tag  = "[PAPER] " if self.paper_mode else ""
         icon = "✅" if pnl >= 0 else "🔴"
         logger.info(f"{tag}Position closed: {reason} ltp={ltp} pnl={pnl}")
+        self._log_activity("exit" if pnl >= 0 else "exit_loss",
+                           f"{tag}SELL {pos['side']} — {pos['symbol']} @ ₹{ltp:.2f} "
+                           f"({'+' if pnl>=0 else ''}₹{pnl:,.2f}, {reason})")
         _tg(f"{icon} <b>{tag}TRADE EXIT — {reason}</b>\n"
             f"Symbol : {pos['symbol']}\n"
             f"Entry  : ₹{pos['entry_price']:.2f}  Exit: ₹{ltp:.2f}\n"
@@ -1409,6 +1421,8 @@ class AngelTrader:
                             if signal:
                                 logger.info(f"Signal: {signal}")
                                 self._enter(signal)
+                            else:
+                                self._log_activity("scan", "Market scan completed — no signal")
                         except Exception as e:
                             logger.error(f"Signal check error: {e}", exc_info=True)
                             self.last_error = str(e)
@@ -1556,6 +1570,16 @@ class AngelTrader:
         else:
             status = "STOPPED"
 
+        if pos["active"]:
+            side, ep, es = pos.get("side"), pos.get("entry_price") or 0, pos.get("entry_spot") or 0
+            if self.strategy == "supertrend":
+                spot_stop = (es - bt.ST6_SPOT_SL) if side == "CE" else (es + bt.ST6_SPOT_SL)
+                pos["stop_desc"]   = f"Spot {spot_stop:.0f} ({bt.ST6_SPOT_SL}pt)" if es else "—"
+                pos["target_desc"] = "Exit on trend flip"
+            else:
+                pos["stop_desc"]   = f"₹{ep*(1-bt.V2_SL_OPTION_PCT):.2f} (−{bt.V2_SL_OPTION_PCT*100:.0f}%)" if ep else "—"
+                pos["target_desc"] = f"₹{ep*(1+bt.V2_PARTIAL_PCT):.2f} (+{bt.V2_PARTIAL_PCT*100:.0f}%)" if ep else "—"
+
         return {
             "status"      : status,
             "connected"   : self.connected,
@@ -1576,6 +1600,7 @@ class AngelTrader:
                 "balance"    : self.balance,
             },
             "trades"      : list(self.trades),
+            "activity"    : list(self._activity),
             "last_error"  : self.last_error,
             "timestamp"   : _now().strftime("%H:%M:%S"),
         }

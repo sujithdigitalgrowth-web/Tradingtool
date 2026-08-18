@@ -384,45 +384,54 @@ TEMPLATE = r"""
 <title>Artha Trading Bot</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <style>
-  body{background:#f1f5f9;color:#1e293b;font-family:'Courier New',monospace}
-  .card{background:#fff;border:1px solid #e2e8f0;border-radius:12px}
-  .tab-a{border-bottom:2px solid #1e293b;color:#1e293b}
-  .tab-i{border-bottom:2px solid transparent;color:#94a3b8}
-  .tab-i:hover{color:#475569}
+  body{background:linear-gradient(180deg,#f8f7fd 0%,#f4f2fb 100%);color:#1e1b2e;
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Roboto,sans-serif}
+  .card{background:#fff;border:1px solid #ece9f7;border-radius:18px;
+    box-shadow:0 1px 2px rgba(76,29,149,.04),0 4px 16px rgba(76,29,149,.05)}
+  .hero-card{background:linear-gradient(135deg,#faf9ff 0%,#f3effe 100%);
+    border:1px solid #e9e4fb;border-radius:20px;
+    box-shadow:0 1px 2px rgba(76,29,149,.05),0 8px 24px rgba(124,58,237,.07)}
+  .tab-a{border-bottom:2px solid #7c3aed;color:#1e1b2e}
+  .tab-i{border-bottom:2px solid transparent;color:#a39fc0}
+  .tab-i:hover{color:#5b5578}
   .pulse{animation:pulse 2s infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
   .badge-live{background:#dcfce7;color:#16a34a;border:1px solid #86efac}
-  .badge-stop{background:#fee2e2;color:#dc2626;border:1px solid #fca5a5}
+  .badge-stop{background:#f1effa;color:#6b6588;border:1px solid #ded8f2}
   .badge-mon {background:#fef9c3;color:#ca8a04;border:1px solid #fde047}
   .badge-paper{background:#dbeafe;color:#1d4ed8;border:1px solid #93c5fd}
+  .pill{background:#f5f3fc;border:1px solid #ece7f9;border-radius:14px}
+  .icon-chip{width:28px;height:28px;border-radius:9999px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+  .orb{width:56px;height:56px;border-radius:9999px;flex-shrink:0;
+    background:conic-gradient(from 180deg,#c4b5fd,#7c3aed,#a78bfa,#c4b5fd);
+    display:flex;align-items:center;justify-content:center;padding:3px}
+  .orb-inner{width:100%;height:100%;border-radius:9999px;background:#fff;
+    display:flex;align-items:center;justify-content:center;font-size:22px}
+  .btn-primary{background:#7c3aed}
+  .btn-primary:hover{background:#6d28d9}
   input[type="date"]{color-scheme:light}
   /* Modal */
-  #modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:50;align-items:center;justify-content:center}
+  #modal-bg{display:none;position:fixed;inset:0;background:rgba(30,27,46,.5);z-index:50;align-items:center;justify-content:center}
   #modal-bg.open{display:flex}
 </style>
 </head>
 <body class="min-h-screen">
 
 <!-- ── Header ── -->
-<div class="bg-white border-b border-gray-200 px-6 py-3">
-  <div class="flex items-center justify-between">
-    <div>
-      <h1 class="text-lg font-bold text-gray-900">Artha Trading Bot</h1>
-      <p id="hdr-subtitle" class="text-xs text-gray-400">Nifty 50 Options &middot; Supertrend Strategy &middot; Angel One</p>
+<div class="bg-white/80 backdrop-blur border-b border-violet-100 px-6 py-3 sticky top-0 z-10">
+  <div class="flex items-center justify-between flex-wrap gap-3">
+    <div class="flex items-center gap-3">
+      <p class="text-sm font-bold text-gray-900">NIFTY 50</p>
+      <p id="hdr-nifty" class="text-lg font-bold text-gray-900">—</p>
     </div>
     <div class="flex items-center gap-5">
-      <!-- Nifty LTP -->
-      <div class="text-right hidden md:block">
-        <p class="text-xs text-gray-400">Nifty 50</p>
-        <p id="hdr-nifty" class="text-base font-bold text-gray-900">—</p>
-      </div>
       <!-- Balance -->
       <div class="text-right hidden md:block">
         <p class="text-xs text-gray-400">Available Cash</p>
-        <p id="hdr-cash" class="text-base font-bold text-gray-700">—</p>
+        <p id="hdr-cash" class="text-sm font-bold text-gray-700">—</p>
       </div>
       <!-- Connection -->
-      <span id="conn-badge" class="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-400">⬤ Connecting</span>
+      <span id="conn-badge" class="text-xs px-2.5 py-1 rounded-full bg-gray-100 text-gray-400">⬤ Connecting</span>
       <!-- Clock -->
       <div id="clock" class="text-xs text-gray-400 text-right min-w-[90px]"></div>
     </div>
@@ -430,7 +439,7 @@ TEMPLATE = r"""
 </div>
 
 <!-- ── Tabs ── -->
-<div class="flex px-6 pt-3 border-b border-gray-200 bg-white">
+<div class="flex px-6 pt-3 border-b border-violet-100 bg-white/60">
   <button onclick="switchTab('live')"    id="tab-live"    class="tab-a  px-5 py-2 text-sm font-semibold">Live Trading</button>
   <button onclick="switchTab('history')" id="tab-history" class="tab-i  px-5 py-2 text-sm font-semibold">Trade History</button>
 </div>
@@ -438,153 +447,214 @@ TEMPLATE = r"""
 <!-- ══════════════ LIVE TAB ══════════════ -->
 <div id="pane-live" class="p-5 space-y-4">
 
-  <!-- ── Control Card ── -->
-  <div class="card p-4">
-    <div class="flex flex-wrap items-center justify-between gap-4">
-      <!-- Status badge + info -->
-      <div class="flex items-center gap-3">
-        <span id="status-badge" class="badge-stop text-xs font-bold px-3 py-1 rounded-full">STOPPED</span>
-        <span id="strategy-badge" class="text-xs font-bold px-3 py-1 rounded-full bg-blue-100 text-blue-700">V2</span>
-        <div id="session-info" class="text-xs text-gray-400"></div>
-      </div>
-      <!-- Buttons -->
-      <div class="flex gap-2">
-        <button id="btn-start" onclick="openStartModal()"
-          class="bg-green-600 hover:bg-green-700 text-white text-sm font-bold px-5 py-2 rounded transition">
-          ▶ Start Trading
-        </button>
-        <button id="btn-stop" onclick="stopTrading()" style="display:none"
-          class="bg-red-600 hover:bg-red-700 text-white text-sm font-bold px-5 py-2 rounded transition">
-          ■ Stop Trading
-        </button>
-        <button id="btn-force" onclick="forceExit()" style="display:none"
-          class="bg-orange-500 hover:bg-orange-600 text-white text-sm font-bold px-5 py-2 rounded transition">
-          ⚠ Force Exit
-        </button>
-        <button id="btn-test" onclick="testTrade()" style="display:none"
-          class="bg-purple-600 hover:bg-purple-700 text-white text-sm font-bold px-5 py-2 rounded transition">
-          ⚡ Test Trade
-        </button>
-      </div>
-    </div>
-  </div>
+  <!-- ── Hero: Bot Card ── -->
+  <div class="hero-card p-5">
+    <div class="flex flex-wrap items-start justify-between gap-5">
+      <div class="min-w-0">
+        <div class="flex items-center gap-3 flex-wrap">
+          <h1 class="text-xl font-extrabold text-gray-900 tracking-tight">ARTHA BOT</h1>
+          <span id="status-badge" class="badge-stop text-xs font-bold px-3 py-1 rounded-full">STOPPED</span>
+        </div>
+        <p id="hero-subtitle" class="text-xs text-gray-500 mt-1">Supertrend Strategy &middot; Nifty 50 Options</p>
 
-  <!-- ── Stats row ── -->
-  <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-    <div class="card p-4">
-      <p class="text-xs text-gray-400 mb-1">Daily P&amp;L</p>
-      <p id="live-pnl" class="text-2xl font-bold text-gray-500">—</p>
-    </div>
-    <div class="card p-4">
-      <p class="text-xs text-gray-400 mb-1">Trades Today</p>
-      <p id="live-trades-ct" class="text-2xl font-bold text-gray-900">—</p>
-    </div>
-    <div class="card p-4">
-      <p class="text-xs text-gray-400 mb-1">Win Rate</p>
-      <p id="live-wr" class="text-2xl font-bold text-gray-900">—</p>
-    </div>
-    <div class="card p-4">
-      <p class="text-xs text-gray-400 mb-1">Cash Available</p>
-      <p id="live-cash" class="text-2xl font-bold text-gray-700">—</p>
-    </div>
-  </div>
+        <div class="mt-4">
+          <p class="text-xs text-gray-400">Today's P&amp;L</p>
+          <p id="live-pnl" class="text-3xl font-extrabold text-gray-300">—</p>
+          <p class="text-xs text-gray-400 mt-0.5">Real-time performance</p>
+        </div>
 
-  <!-- ── 14-Day Performance ── -->
-  <div class="card p-4">
-    <div class="flex items-center justify-between mb-4">
-      <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold">14-Day Performance</p>
-      <span id="perf14-total" class="text-xs text-gray-400">— trades</span>
-    </div>
-    <div class="flex items-center gap-6">
-      <div class="text-center shrink-0">
-        <p id="perf14-winrate" class="text-3xl font-bold text-gray-300">—</p>
-        <p class="text-xs text-gray-400 mt-1">Win Rate</p>
+        <div class="flex flex-wrap gap-2 mt-4">
+          <div class="pill px-3 py-2 flex items-center gap-2">
+            <span class="icon-chip bg-blue-100 text-blue-600"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"/><path d="M6 20v-6"/><path d="M12 20V9"/><path d="M18 20V4"/></svg></span>
+            <div><p id="live-lots" class="text-sm font-bold text-gray-900 leading-none">—</p>
+            <p class="text-[10px] text-gray-400 mt-0.5">Position Size</p></div>
+          </div>
+          <div class="pill px-3 py-2 flex items-center gap-2">
+            <span class="icon-chip bg-violet-100 text-violet-600"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2.1l4 4-4 4"/><path d="M3 12.2v-2a4 4 0 0 1 4-4h14"/><path d="M7 21.9l-4-4 4-4"/><path d="M21 11.8v2a4 4 0 0 1-4 4H3"/></svg></span>
+            <div><p id="live-trades-ct" class="text-sm font-bold text-gray-900 leading-none">—</p>
+            <p class="text-[10px] text-gray-400 mt-0.5">Trades Today</p></div>
+          </div>
+          <div class="pill px-3 py-2 flex items-center gap-2">
+            <span class="icon-chip bg-green-100 text-green-600"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1" fill="currentColor"/></svg></span>
+            <div><p id="hero-wr14" class="text-sm font-bold text-gray-900 leading-none">—</p>
+            <p class="text-[10px] text-gray-400 mt-0.5">14D Win Rate</p></div>
+          </div>
+        </div>
       </div>
-      <div class="flex-1 min-w-0">
-        <div id="perf14-bar" class="flex h-3 rounded-full overflow-hidden bg-gray-100 w-full"></div>
-        <div class="flex justify-between mt-2 text-xs">
-          <span class="flex items-center gap-1.5 text-gray-600">
-            <span class="w-2 h-2 rounded-full bg-green-500 inline-block"></span>
-            <span id="perf14-wins">0 wins</span>
-          </span>
-          <span class="flex items-center gap-1.5 text-gray-600">
-            <span class="w-2 h-2 rounded-full bg-red-500 inline-block"></span>
-            <span id="perf14-losses">0 losses</span>
-          </span>
+
+      <div class="flex flex-col items-end gap-2">
+        <div class="flex gap-2">
+          <button id="btn-start" onclick="openStartModal()"
+            class="btn-primary text-white text-sm font-bold px-5 py-2.5 rounded-xl transition">
+            ▶ Start Bot
+          </button>
+          <button id="btn-exit" onclick="manualExitPosition()" style="display:none"
+            class="bg-white border border-red-200 text-red-600 hover:bg-red-50 text-sm font-bold px-5 py-2.5 rounded-xl transition">
+            ✕ Exit Trade
+          </button>
+          <button id="btn-stop" onclick="stopTrading()" style="display:none"
+            class="bg-red-600 hover:bg-red-700 text-white text-sm font-bold px-5 py-2.5 rounded-xl transition">
+            ■ Stop Bot
+          </button>
+          <button id="btn-force" onclick="forceExit()" style="display:none"
+            class="bg-orange-500 hover:bg-orange-600 text-white text-sm font-bold px-5 py-2.5 rounded-xl transition">
+            ⚠ Force Exit
+          </button>
+          <button id="btn-test" onclick="testTrade()" style="display:none"
+            class="bg-white border border-violet-200 text-violet-700 hover:bg-violet-50 text-sm font-bold px-5 py-2.5 rounded-xl transition">
+            ⚡ Test Trade
+          </button>
+        </div>
+        <div class="flex items-center gap-2">
+          <span id="paper-badge" class="hidden text-xs font-bold px-3 py-1 rounded-full bg-blue-100 text-blue-700">PAPER</span>
+          <span id="strategy-badge" class="text-xs font-bold px-3 py-1 rounded-full bg-violet-100 text-violet-700">V2</span>
         </div>
       </div>
     </div>
+
+    <div class="flex items-center gap-2 mt-4 pt-4 border-t border-violet-100">
+      <span id="hero-status-dot" class="w-2 h-2 rounded-full bg-gray-300 shrink-0"></span>
+      <p id="hero-status-line" class="text-xs text-gray-500">Bot is stopped</p>
+    </div>
   </div>
 
-  <!-- ── Signal Monitor ── -->
-  <div class="card p-4">
-    <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold mb-3">Signal Monitor</p>
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-      <div>
-        <p id="sig-vix-label" class="text-xs text-gray-400 mb-1">Supertrend</p>
-        <p id="sig-vix" class="font-bold text-gray-800">—</p>
-      </div>
-      <div>
-        <p class="text-xs text-gray-400 mb-1">Last Signal</p>
-        <p id="sig-last" class="font-bold text-gray-400">No signal</p>
-      </div>
-      <div>
-        <p class="text-xs text-gray-400 mb-1">Checked At</p>
-        <p id="sig-time" class="font-bold text-gray-600">—</p>
-      </div>
-      <div>
-        <p class="text-xs text-gray-400 mb-1">Next Check</p>
-        <p id="sig-next" class="font-bold text-gray-600">—</p>
-      </div>
-    </div>
-    <div id="sig-filter" class="hidden mt-3 bg-amber-50 border border-amber-200 text-amber-800 text-xs rounded px-3 py-2"></div>
-    <div id="sig-error"  class="hidden mt-3 bg-red-50  border border-red-200  text-red-700  text-xs rounded px-3 py-2"></div>
-  </div>
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+    <!-- ═══ LEFT column ═══ -->
+    <div class="lg:col-span-2 space-y-4">
 
-  <!-- ── Active Position ── -->
-  <div id="pos-card" class="card p-4 hidden">
-    <div class="flex items-center justify-between mb-3">
-      <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold">Open Position</p>
-      <div class="flex items-center gap-2">
-        <span id="pos-badge" class="text-xs font-bold px-2 py-0.5 rounded bg-blue-100 text-blue-700">CE</span>
-        <button onclick="manualExitPosition()"
-          class="text-xs font-bold px-3 py-1 rounded bg-red-100 text-red-700 hover:bg-red-200 transition">
-          ✕ Exit Trade
-        </button>
+      <!-- ── 14-Day Performance ── -->
+      <div class="card p-5">
+        <div class="flex items-center justify-between mb-4">
+          <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold">14-Day Performance</p>
+          <span id="perf14-total" class="text-xs text-gray-400 pill px-2 py-0.5">— trades</span>
+        </div>
+        <div class="flex flex-wrap gap-8 mb-2">
+          <div>
+            <p id="perf14-pnl" class="text-2xl font-extrabold text-gray-300">—</p>
+            <p class="text-xs text-gray-400">Total P&amp;L</p>
+          </div>
+          <div>
+            <p id="perf14-wins-n" class="text-2xl font-extrabold text-green-600">—</p>
+            <p class="text-xs text-gray-400">Wins</p>
+          </div>
+          <div>
+            <p id="perf14-losses-n" class="text-2xl font-extrabold text-red-500">—</p>
+            <p class="text-xs text-gray-400">Losses</p>
+          </div>
+          <div>
+            <p id="perf14-winrate" class="text-2xl font-extrabold text-gray-900">—</p>
+            <p class="text-xs text-gray-400">Win Rate</p>
+          </div>
+        </div>
+        <div id="perf14-chart" class="mt-3"></div>
       </div>
-    </div>
-    <div class="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
-      <div><p class="text-xs text-gray-400 mb-0.5">Symbol</p><p id="pos-sym" class="font-bold text-gray-900 text-xs"></p></div>
-      <div><p class="text-xs text-gray-400 mb-0.5">Entry Price</p><p id="pos-entry" class="font-bold text-gray-900"></p></div>
-      <div><p class="text-xs text-gray-400 mb-0.5">Current LTP</p><p id="pos-ltp" class="font-bold text-gray-900"></p></div>
-      <div><p class="text-xs text-gray-400 mb-0.5">Live P&amp;L</p><p id="pos-pnl" class="text-xl font-bold"></p></div>
-      <div><p class="text-xs text-gray-400 mb-0.5">Entry Time</p><p id="pos-time" class="font-bold text-gray-600"></p></div>
-    </div>
-    <div class="grid grid-cols-3 gap-4 text-sm mt-3 pt-3 border-t border-gray-100">
-      <div>
-        <p class="text-xs text-gray-400 mb-0.5">Stop Loss <span class="text-gray-300">(−20%)</span></p>
-        <p id="pos-sl" class="font-bold text-red-600"></p>
-        <p id="pos-spot-sl" class="text-xs text-red-400 mt-0.5"></p>
-      </div>
-      <div>
-        <p class="text-xs text-gray-400 mb-0.5">Target <span class="text-gray-300">(+10%)</span></p>
-        <p id="pos-target" class="font-bold text-green-600"></p>
-      </div>
-      <div>
-        <p class="text-xs text-gray-400 mb-0.5">Entry Spot</p>
-        <p id="pos-entry-spot" class="font-bold text-gray-700"></p>
-      </div>
-    </div>
-    <div id="pos-tags" class="flex gap-2 mt-2"></div>
-  </div>
 
-  <!-- ── Trade Log ── -->
-  <div class="card overflow-hidden">
-    <div class="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
-      <p class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Today's Trades</p>
-      <span id="live-trade-badge" class="text-xs text-gray-400"></span>
+      <!-- ── Active Position ── -->
+      <div id="pos-card" class="card p-5 hidden">
+        <div class="flex items-center justify-between mb-4">
+          <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold">Open Position</p>
+          <div class="flex items-center gap-2">
+            <span id="pos-badge" class="text-xs font-bold px-2.5 py-0.5 rounded-full bg-blue-100 text-blue-700">CE</span>
+            <button onclick="manualExitPosition()"
+              class="text-xs font-bold px-3 py-1 rounded-full bg-red-100 text-red-700 hover:bg-red-200 transition">
+              ✕ Exit Trade
+            </button>
+          </div>
+        </div>
+        <div class="flex items-center justify-between flex-wrap gap-3 pb-4 border-b border-gray-100">
+          <div>
+            <p id="pos-sym" class="text-base font-bold text-gray-900"></p>
+            <p class="text-xs text-gray-400">Qty <span id="pos-qty" class="font-semibold text-gray-600"></span>
+              &middot; Entry <span id="pos-time" class="font-semibold text-gray-600"></span></p>
+          </div>
+          <div class="text-right">
+            <p id="pos-pnl" class="text-2xl font-extrabold"></p>
+            <p id="pos-pnl-pct" class="text-xs font-semibold"></p>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm pt-3">
+          <div><p class="text-xs text-gray-400 mb-0.5">LTP</p><p id="pos-ltp" class="font-bold text-gray-900"></p></div>
+          <div><p class="text-xs text-gray-400 mb-0.5">Stop Loss</p><p id="pos-sl" class="font-bold text-red-600"></p></div>
+          <div><p class="text-xs text-gray-400 mb-0.5">Target</p><p id="pos-target" class="font-bold text-green-600"></p></div>
+          <div><p class="text-xs text-gray-400 mb-0.5">Invested</p><p id="pos-invested" class="font-bold text-gray-700"></p></div>
+        </div>
+        <div id="pos-tags" class="flex gap-2 mt-3"></div>
+      </div>
+
+      <!-- ── Trade Log ── -->
+      <div class="card overflow-hidden">
+        <div class="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
+          <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold">Today's Trades</p>
+          <span id="live-trade-badge" class="text-xs text-gray-400"></span>
+        </div>
+        <div id="live-trades-tbl"></div>
+      </div>
+
     </div>
-    <div id="live-trades-tbl"></div>
+
+    <!-- ═══ RIGHT column ═══ -->
+    <div class="space-y-4">
+
+      <!-- ── Bot Status ── -->
+      <div class="card p-5">
+        <div class="flex items-start justify-between gap-3">
+          <div class="flex-1 min-w-0">
+            <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold mb-3">Bot Status</p>
+            <div class="flex items-center gap-2 mb-3">
+              <span id="bs-dot" class="w-2 h-2 rounded-full bg-gray-300"></span>
+              <span id="bs-status" class="text-sm font-bold text-gray-800">Stopped</span>
+            </div>
+          </div>
+          <div class="orb"><div class="orb-inner">🤖</div></div>
+        </div>
+        <div class="space-y-2 text-xs">
+          <div class="flex justify-between gap-2"><span class="text-gray-400 shrink-0">Last Signal</span>
+            <span id="bs-last-signal" class="font-semibold text-gray-700 text-right">—</span></div>
+          <div class="flex justify-between gap-2"><span class="text-gray-400 shrink-0" id="bs-indicator-label">Supertrend</span>
+            <span id="bs-indicator" class="font-semibold text-gray-700 text-right">—</span></div>
+          <div class="flex justify-between gap-2"><span class="text-gray-400 shrink-0">Next Check</span>
+            <span id="bs-countdown" class="font-mono font-semibold text-violet-700">—</span></div>
+        </div>
+        <div id="sig-filter" class="hidden mt-3 bg-amber-50 border border-amber-200 text-amber-800 text-xs rounded-lg px-3 py-2"></div>
+        <div id="sig-error"  class="hidden mt-3 bg-red-50  border border-red-200  text-red-700  text-xs rounded-lg px-3 py-2"></div>
+        <button onclick="document.getElementById('activity-card').scrollIntoView({behavior:'smooth'})"
+          class="text-xs text-violet-600 font-semibold mt-3 hover:underline">👁 View Logs</button>
+      </div>
+
+      <!-- ── Mini stats ── -->
+      <div class="grid grid-cols-2 gap-3">
+        <div class="card p-3">
+          <span class="icon-chip bg-blue-100 text-blue-600 mb-2"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/></svg></span>
+          <p class="text-xs text-gray-400">Cash Available</p>
+          <p id="live-cash" class="text-sm font-bold text-gray-800">—</p>
+        </div>
+        <div class="card p-3">
+          <span class="icon-chip bg-violet-100 text-violet-600 mb-2"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2.1l4 4-4 4"/><path d="M3 12.2v-2a4 4 0 0 1 4-4h14"/><path d="M7 21.9l-4-4 4-4"/><path d="M21 11.8v2a4 4 0 0 1-4 4H3"/></svg></span>
+          <p class="text-xs text-gray-400">Max Trades</p>
+          <p id="mini-maxtrades" class="text-sm font-bold text-gray-800">—</p>
+        </div>
+        <div class="card p-3">
+          <span class="icon-chip bg-amber-100 text-amber-600 mb-2"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 16l4-6 4 3 5-7"/></svg></span>
+          <p class="text-xs text-gray-400">Daily P&amp;L</p>
+          <p id="mini-dailypnl" class="text-sm font-bold text-gray-800">—</p>
+        </div>
+        <div class="card p-3">
+          <span class="icon-chip bg-green-100 text-green-600 mb-2"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 21h8"/><path d="M12 17v4"/><path d="M7 4h10v5a5 5 0 0 1-10 0V4Z"/><path d="M17 5h2a2 2 0 0 1 0 4h-1"/><path d="M7 5H5a2 2 0 0 0 0 4h1"/></svg></span>
+          <p class="text-xs text-gray-400">Win Rate (14D)</p>
+          <p id="mini-wr14" class="text-sm font-bold text-gray-800">—</p>
+        </div>
+      </div>
+
+      <!-- ── Recent Activity ── -->
+      <div id="activity-card" class="card p-5">
+        <div class="flex items-center justify-between mb-3">
+          <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold">Recent Activity</p>
+          <button id="activity-toggle" onclick="toggleActivity()" class="text-xs text-violet-600 font-semibold hover:underline">View All</button>
+        </div>
+        <div id="activity-list" class="space-y-3"></div>
+      </div>
+
+    </div>
   </div>
 
 </div><!-- /pane-live -->
@@ -837,7 +907,13 @@ const cls=n=>n>=0?'text-green-600':'text-red-500';
 // ── Trade table builder ────────────────────────────────────────
 function tradeTable(trades){
   if(!trades||!trades.length)
-    return '<div class="px-4 py-8 text-center text-gray-400 text-sm">No trades yet.</div>';
+    return `<div class="px-4 py-10 text-center">
+      <div class="mx-auto w-10 h-10 rounded-full bg-violet-100 flex items-center justify-center text-violet-500 mb-3">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M9 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-3"/><path d="M9 12h6"/><path d="M9 16h6"/></svg>
+      </div>
+      <p class="text-sm text-gray-500 font-semibold">No trades yet today.</p>
+      <p class="text-xs text-gray-400 mt-1">Sit back and let Artha do the magic.</p>
+    </div>`;
   const LOT=65;
   const rows=[...trades].reverse().map(t=>{
     const boughtUnits = t.qty_bought || t.qty || 0;
@@ -887,6 +963,9 @@ function tradeTable(trades){
 }
 
 // ── Live state polling ─────────────────────────────────────────
+let nextCheckStr = null;
+let activityItems = [], activityShowAll = false;
+
 function refreshLive(){
   fetch('/api/live-state').then(r=>r.json()).then(s=>{
     const pos   = s.position  || {};
@@ -894,22 +973,43 @@ function refreshLive(){
     const sig   = s.signal    || {};
     const mkt   = s.market    || {};
 
-    // Status badge
+    // Status badge + hero status line
     const status = s.status || 'STOPPED';
     const badge  = document.getElementById('status-badge');
     badge.textContent = status;
     badge.className   = 'text-xs font-bold px-3 py-1 rounded-full '+
       (status==='LIVE'?'badge-live pulse':status==='PAPER'?'badge-paper pulse':status==='MONITORING'?'badge-mon':'badge-stop');
+    const dot  = document.getElementById('hero-status-dot');
+    const line = document.getElementById('hero-status-line');
+    const bsDot = document.getElementById('bs-dot');
+    const bsStatus = document.getElementById('bs-status');
+    if(status==='LIVE'||status==='PAPER'){
+      dot.className='w-2 h-2 rounded-full bg-green-500 shrink-0 pulse';
+      line.textContent = s.last_error ? 'Bot hit an error — check logs' : 'Bot is running normally';
+      bsDot.className='w-2 h-2 rounded-full bg-green-500 pulse';
+      bsStatus.textContent = 'Running smoothly';
+    } else if(status==='MONITORING'){
+      dot.className='w-2 h-2 rounded-full bg-amber-500 shrink-0 pulse';
+      line.textContent='Monitoring open position — not taking new entries';
+      bsDot.className='w-2 h-2 rounded-full bg-amber-500 pulse';
+      bsStatus.textContent='Monitoring only';
+    } else {
+      dot.className='w-2 h-2 rounded-full bg-gray-300 shrink-0';
+      line.textContent='Bot is stopped';
+      bsDot.className='w-2 h-2 rounded-full bg-gray-300';
+      bsStatus.textContent='Stopped';
+    }
 
-    // Strategy badge
+    // Strategy + paper badges, hero subtitle
     const strategy = (s.config && s.config.strategy) || 'v2';
     const isST     = strategy === 'supertrend';
     const stBadge  = document.getElementById('strategy-badge');
     stBadge.textContent = isST ? 'SUPERTREND' : 'V2';
     stBadge.className   = 'text-xs font-bold px-3 py-1 rounded-full '+
-      (isST ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700');
-    document.getElementById('hdr-subtitle').textContent =
-      'Nifty 50 Options · '+(isST ? 'Supertrend' : 'V2')+' Strategy · Angel One';
+      (isST ? 'bg-violet-100 text-violet-700' : 'bg-blue-100 text-blue-700');
+    document.getElementById('hero-subtitle').textContent =
+      (isST ? 'Supertrend' : 'V2')+' Strategy · Nifty 50 Options';
+    document.getElementById('paper-badge').classList.toggle('hidden', !(status==='PAPER'||s.paper_mode));
 
     // Buttons
     const isLive  = (status==='LIVE');
@@ -920,95 +1020,85 @@ function refreshLive(){
     document.getElementById('btn-stop') .style.display = isActive?'':'none';
     document.getElementById('btn-force').style.display = isMon ?'':'none';
     document.getElementById('btn-test') .style.display = (isActive && !pos.active)?'':'none';
+    document.getElementById('btn-exit') .style.display = pos.active?'':'none';
 
     // Connection badge
     const cb = document.getElementById('conn-badge');
     cb.textContent = s.connected ? '⬤ Connected' : '⬤ Offline';
-    cb.className   = 'text-xs px-2 py-1 rounded-full '+
+    cb.className   = 'text-xs px-2.5 py-1 rounded-full '+
       (s.connected ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-400');
 
-    // Session info
-    let info = '';
-    if(isActive||isMon){
-      info=`${s.config?.lots||1} lot(s) · max ${s.config?.max_trades||2} trades`;
-      if(isPaper||s.paper_mode) info += ' · PAPER';
-    }
-    document.getElementById('session-info').textContent = info;
-
-    // Stats
+    // Hero pills + stats
     const pnl = stats.pnl ?? 0;
     const pnlEl = document.getElementById('live-pnl');
     pnlEl.textContent = (pnl>=0?'+':'')+inr(pnl);
-    pnlEl.className   = 'text-2xl font-bold '+cls(pnl);
+    pnlEl.className   = 'text-3xl font-extrabold '+cls(pnl);
+    document.getElementById('live-lots').textContent = (s.config?.lots||1)+' Lot'+((s.config?.lots||1)!==1?'s':'');
     document.getElementById('live-trades-ct').textContent =
-      (stats.trade_count||0)+(s.config?.max_trades?' / '+(s.config.max_trades):'');
-    document.getElementById('live-wr').textContent =
-      stats.trade_count ? (stats.win_rate||0)+'%' : '—';
+      (stats.trade_count||0)+' / '+(s.config?.max_trades||2);
     const cash = stats.balance||0;
     document.getElementById('live-cash').textContent = cash ? inr(cash) : '—';
+    document.getElementById('mini-maxtrades').textContent =
+      (stats.trade_count||0)+' / '+(s.config?.max_trades||2)+' trades';
+    const dpnlEl = document.getElementById('mini-dailypnl');
+    dpnlEl.textContent = (pnl>=0?'+':'')+inr(pnl);
+    dpnlEl.className   = 'text-sm font-bold '+cls(pnl);
 
     // Header Nifty + Cash
-    if(mkt.nifty_ltp) document.getElementById('hdr-nifty').textContent='₹'+mkt.nifty_ltp.toFixed(0);
+    if(mkt.nifty_ltp) document.getElementById('hdr-nifty').textContent='₹'+mkt.nifty_ltp.toLocaleString('en-IN',{minimumFractionDigits:2});
     if(cash)          document.getElementById('hdr-cash') .textContent=inr(cash);
 
-    // Signal monitor (VIX for V2, Supertrend direction for Supertrend)
-    const vixLabel = document.getElementById('sig-vix-label');
-    const vixVal   = document.getElementById('sig-vix');
+    // Bot Status: last signal, indicator, filter/error
+    const bsLabel = document.getElementById('bs-indicator-label');
+    const bsInd   = document.getElementById('bs-indicator');
     if(isST){
-      vixLabel.textContent = 'Supertrend';
-      if(mkt.st_trend === 1)       { vixVal.textContent = 'Uptrend ▲';   vixVal.className = 'font-bold text-green-600'; }
-      else if(mkt.st_trend === -1) { vixVal.textContent = 'Downtrend ▼'; vixVal.className = 'font-bold text-red-600'; }
-      else                         { vixVal.textContent = '—';           vixVal.className = 'font-bold text-gray-800'; }
+      bsLabel.textContent = 'Supertrend';
+      if(mkt.st_trend === 1)       { bsInd.textContent = 'Uptrend ▲';   bsInd.className = 'font-semibold text-green-600 text-right'; }
+      else if(mkt.st_trend === -1) { bsInd.textContent = 'Downtrend ▼'; bsInd.className = 'font-semibold text-red-600 text-right'; }
+      else                         { bsInd.textContent = '—';           bsInd.className = 'font-semibold text-gray-700 text-right'; }
     } else {
-      vixLabel.textContent = 'India VIX';
-      vixVal.textContent   = mkt.vix ? mkt.vix+'' : '—';
-      vixVal.className     = 'font-bold text-gray-800';
+      bsLabel.textContent = 'India VIX';
+      bsInd.textContent   = mkt.vix ? mkt.vix+'' : '—';
+      bsInd.className     = 'font-semibold text-gray-700 text-right';
     }
-    const sigEl = document.getElementById('sig-last');
-    const sigVal = sig.signal;
-    if(sigVal){
-      sigEl.textContent  = sigVal;
-      sigEl.className    = 'font-bold '+(sigVal.includes('CE')?'text-blue-600':'text-amber-600');
+    const lastSigEl = document.getElementById('bs-last-signal');
+    if(sig.signal){
+      lastSigEl.textContent = sig.signal+(sig.time?' · '+sig.time:'');
+      lastSigEl.className   = 'font-semibold text-right '+(sig.signal.includes('CE')?'text-blue-600':'text-amber-600');
     } else {
-      sigEl.textContent  = 'No signal';
-      sigEl.className    = 'font-bold text-gray-400';
+      lastSigEl.textContent = 'None yet';
+      lastSigEl.className   = 'font-semibold text-gray-400 text-right';
     }
-    document.getElementById('sig-time').textContent = sig.time   || '—';
-    document.getElementById('sig-next').textContent = sig.next_check || '—';
+    nextCheckStr = sig.next_check || null;
+    updateCountdown();
 
     // Active position
     const posCard = document.getElementById('pos-card');
     if(pos.active){
       posCard.classList.remove('hidden');
-      document.getElementById('pos-sym')  .textContent = pos.symbol||'—';
-      document.getElementById('pos-entry').textContent = pos.entry_price?'₹'+pos.entry_price.toFixed(2):'—';
-      document.getElementById('pos-ltp')  .textContent = pos.live_ltp?'₹'+pos.live_ltp.toFixed(2):'—';
+      document.getElementById('pos-sym').textContent = pos.symbol||'—';
+      document.getElementById('pos-qty').textContent  = pos.qty||'—';
+      document.getElementById('pos-ltp').textContent  = pos.live_ltp?'₹'+pos.live_ltp.toFixed(2):'—';
+      document.getElementById('pos-time').textContent = pos.entry_time||'—';
       const pp = pos.live_pnl||0;
       const ppEl = document.getElementById('pos-pnl');
       ppEl.textContent = (pp>=0?'+':'')+inr(pp);
-      ppEl.className   = 'text-xl font-bold '+cls(pp);
-      document.getElementById('pos-time').textContent = pos.entry_time||'—';
-      // SL / Target / Spot levels
-      const ep = pos.entry_price||0, es = pos.entry_spot||0;
-      document.getElementById('pos-sl')    .textContent = ep ? '₹'+(ep*0.80).toFixed(2) : '—';
-      document.getElementById('pos-target').textContent = ep ? '₹'+(ep*1.10).toFixed(2) : '—';
-      document.getElementById('pos-entry-spot').textContent = es ? '₹'+es.toFixed(0) : '—';
-      // Spot SL hint: 50pt warn / 80pt hard stop on Nifty
-      if(es && pos.side){
-        const warn = pos.side==='CE' ? es-50 : es+50;
-        const hard = pos.side==='CE' ? es-80 : es+80;
-        document.getElementById('pos-spot-sl').textContent =
-          'Nifty SL: ₹'+warn.toFixed(0)+' warn / ₹'+hard.toFixed(0)+' hard';
-      } else {
-        document.getElementById('pos-spot-sl').textContent = '';
-      }
+      ppEl.className   = 'text-2xl font-extrabold '+cls(pp);
+      const ep = pos.entry_price||0;
+      const pctEl = document.getElementById('pos-pnl-pct');
+      const pct = ep ? (pp/(ep*(pos.qty||1))*100) : 0;
+      pctEl.textContent = ep ? (pp>=0?'+':'')+pct.toFixed(2)+'%' : '';
+      pctEl.className   = 'text-xs font-semibold '+cls(pp);
+      document.getElementById('pos-sl')      .textContent = pos.stop_desc   || '—';
+      document.getElementById('pos-target')  .textContent = pos.target_desc || '—';
+      document.getElementById('pos-invested').textContent = ep && pos.qty ? inr(ep*pos.qty) : '—';
       document.getElementById('pos-badge').textContent = pos.side||'';
       document.getElementById('pos-badge').className =
-        'text-xs font-bold px-2 py-0.5 rounded '+
+        'text-xs font-bold px-2.5 py-0.5 rounded-full '+
         (pos.side==='CE'?'bg-blue-100 text-blue-700':'bg-amber-100 text-amber-700');
       let tags='';
-      if(pos.partial_done) tags+='<span class="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded">Partial exited</span>';
-      if(pos.trail_on)     tags+='<span class="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded ml-1">Trail active</span>';
+      if(pos.partial_done) tags+='<span class="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full">Partial exited</span>';
+      if(pos.trail_on)     tags+='<span class="text-xs bg-violet-100 text-violet-700 px-2 py-0.5 rounded-full ml-1">Trail active</span>';
       document.getElementById('pos-tags').innerHTML=tags;
     } else {
       posCard.classList.add('hidden');
@@ -1020,17 +1110,17 @@ function refreshLive(){
     document.getElementById('live-trade-badge').textContent =
       trades.length ? trades.length+' trade'+(trades.length>1?'s':'') : '';
 
-    // Filter reason in signal monitor
+    // Filter reason
     const filterBox = document.getElementById('sig-filter');
     const filterReason = sig.filter_reason;
     if(filterReason && !pos.active){
-      filterBox.textContent = '⚙ Filter: ' + filterReason;
+      filterBox.textContent = '⚙ '+filterReason;
       filterBox.classList.remove('hidden');
     } else {
       filterBox.classList.add('hidden');
     }
 
-    // Error in signal monitor (persistent until cleared)
+    // Error (persistent until cleared)
     const errBox = document.getElementById('sig-error');
     if(s.last_error){
       errBox.textContent = 'Error: '+s.last_error;
@@ -1038,9 +1128,53 @@ function refreshLive(){
     } else {
       errBox.classList.add('hidden');
     }
+
+    // Recent activity
+    activityItems = s.activity || [];
+    document.getElementById('activity-list').innerHTML = renderActivity(activityItems, activityShowAll);
   }).catch(()=>{});
 }
 setInterval(refreshLive, 5000); refreshLive();
+
+// ── Bot Status countdown (ticks every second between 5s polls) ──
+function updateCountdown(){
+  const el = document.getElementById('bs-countdown');
+  if(!nextCheckStr){ el.textContent='—'; return; }
+  const now = new Date();
+  const [hh,mm] = nextCheckStr.split(':').map(Number);
+  const target = new Date(now); target.setHours(hh,mm,0,0);
+  let diff = Math.floor((target-now)/1000);
+  if(diff < 0){ el.textContent='Checking…'; return; }
+  const m = Math.floor(diff/60), sec = diff%60;
+  el.textContent = String(m).padStart(2,'0')+':'+String(sec).padStart(2,'0');
+}
+setInterval(updateCountdown, 1000);
+
+// ── Recent Activity feed ─────────────────────────────────────────
+function renderActivity(items, showAll){
+  if(!items || !items.length)
+    return '<p class="text-xs text-gray-400 text-center py-6">No activity yet today.</p>';
+  const shown = showAll ? items : items.slice(0,4);
+  const iconFor = k => k==='entry'     ? ['bg-blue-100 text-blue-600','↗'] :
+                        k==='exit'     ? ['bg-green-100 text-green-600','✓'] :
+                        k==='exit_loss'? ['bg-red-100 text-red-600','✕'] :
+                                         ['bg-violet-100 text-violet-600','◎'];
+  return shown.map(a=>{
+    const [css,icon] = iconFor(a.kind);
+    return `<div class="flex items-start gap-3">
+      <span class="w-6 h-6 rounded-full flex items-center justify-center text-xs shrink-0 ${css}">${icon}</span>
+      <div class="min-w-0">
+        <p class="text-xs text-gray-700 leading-snug">${a.text}</p>
+        <p class="text-[10px] text-gray-400">${a.time}</p>
+      </div>
+    </div>`;
+  }).join('');
+}
+function toggleActivity(){
+  activityShowAll = !activityShowAll;
+  document.getElementById('activity-toggle').textContent = activityShowAll?'Show Less':'View All';
+  document.getElementById('activity-list').innerHTML = renderActivity(activityItems, activityShowAll);
+}
 
 // Also refresh balance separately every 30s
 function refreshBalance(){
@@ -1054,6 +1188,32 @@ function refreshBalance(){
 setInterval(refreshBalance,30000); refreshBalance();
 
 // 14-day win/loss performance (slow-moving — refresh every 60s)
+function renderSparkline(dayLabels, cumValues){
+  if(!cumValues.length || cumValues.every(v=>v===0))
+    return '<p class="text-xs text-gray-400 text-center py-10">No trades in this window yet.</p>';
+  const w=600, h=140, pad=6;
+  const min=Math.min(0,...cumValues), max=Math.max(0,...cumValues);
+  const range=(max-min)||1;
+  const x = i => pad + i*(w-2*pad)/Math.max(1,cumValues.length-1);
+  const y = v => h-pad - (v-min)/range*(h-2*pad);
+  const pts = cumValues.map((v,i)=>[x(i),y(v)]);
+  const line = pts.map((p,i)=>(i===0?'M':'L')+p[0].toFixed(1)+','+p[1].toFixed(1)).join(' ');
+  const area = line+` L${pts[pts.length-1][0].toFixed(1)},${(h-pad).toFixed(1)} L${pts[0][0].toFixed(1)},${(h-pad).toFixed(1)} Z`;
+  const zeroY = y(0).toFixed(1);
+  const last  = pts[pts.length-1];
+  const lastVal = cumValues[cumValues.length-1];
+  const lastLabel = (lastVal>=0?'+':'-')+'₹'+Math.abs(lastVal).toLocaleString('en-IN',{maximumFractionDigits:0});
+  return `<svg viewBox="0 0 ${w} ${h}" class="w-full h-32" preserveAspectRatio="none">
+      <line x1="${pad}" y1="${zeroY}" x2="${w-pad}" y2="${zeroY}" stroke="#e9e4fb" stroke-width="1"/>
+      <path d="${area}" fill="#7c3aed" fill-opacity="0.08" stroke="none"/>
+      <path d="${line}" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+      <circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="4.5" fill="#7c3aed" stroke="#fff" stroke-width="2"/>
+    </svg>
+    <div class="flex justify-between text-[10px] text-gray-400 mt-1 px-0.5">
+      <span>${dayLabels[0]}</span><span class="font-semibold text-violet-700">${lastLabel}</span><span>${dayLabels[dayLabels.length-1]}</span>
+    </div>`;
+}
+
 function refreshPerf14(){
   const to   = new Date();
   const from = new Date(to.getTime() - 13*24*60*60*1000);
@@ -1063,19 +1223,36 @@ function refreshPerf14(){
     const wins   = s.wins   || 0;
     const losses = s.losses || 0;
     const total  = s.total_trades || 0;
-    document.getElementById('perf14-total').textContent = total+' trade'+(total===1?'':'s');
-    const wrEl = document.getElementById('perf14-winrate');
-    wrEl.textContent = total ? s.win_rate+'%' : '—';
-    wrEl.className   = 'text-3xl font-bold '+
-      (!total ? 'text-gray-300' : s.win_rate>=50 ? 'text-green-600' : 'text-red-600');
-    document.getElementById('perf14-wins').textContent   = wins+' win'+(wins===1?'':'s');
-    document.getElementById('perf14-losses').textContent = losses+' loss'+(losses===1?'':'es');
-    const winPct  = total ? (wins/total*100)   : 0;
-    const lossPct = total ? (losses/total*100) : 0;
-    document.getElementById('perf14-bar').innerHTML = !total ? '' :
-      `<div style="width:${winPct}%" class="bg-green-500"></div>`+
-      `<div style="width:2px" class="bg-white"></div>`+
-      `<div style="width:${lossPct}%" class="bg-red-500"></div>`;
+    const winRate = total ? s.win_rate : 0;
+
+    document.getElementById('perf14-total').textContent = total+' trade'+(total===1?'':'s')+' · 14 days';
+    const pnlEl = document.getElementById('perf14-pnl');
+    pnlEl.textContent = total ? (s.total_pnl>=0?'+':'')+inr(s.total_pnl) : '—';
+    pnlEl.className   = 'text-2xl font-extrabold '+(total?cls(s.total_pnl):'text-gray-300');
+    document.getElementById('perf14-wins-n').textContent   = wins;
+    document.getElementById('perf14-losses-n').textContent = losses;
+    document.getElementById('perf14-winrate').textContent  = total ? winRate+'%' : '—';
+
+    // 14-day headline pills
+    const wr14a = document.getElementById('hero-wr14');
+    const wr14b = document.getElementById('mini-wr14');
+    wr14a.textContent = total ? winRate+'%' : '—';
+    wr14b.textContent = total ? winRate+'%' : '—';
+
+    // Build a daily cumulative P&L series across all 14 calendar days
+    // (including zero-trade days, so the line reflects real gaps).
+    const byDate = {};
+    (d.trades||[]).forEach(t=>{ if(t.pnl!=null) byDate[t.date]=(byDate[t.date]||0)+t.pnl; });
+    const dayLabels=[], cumValues=[];
+    let running=0;
+    for(let i=13;i>=0;i--){
+      const dt = new Date(to.getTime()-i*24*60*60*1000);
+      const key = dt.toISOString().slice(0,10);
+      running += byDate[key]||0;
+      dayLabels.push(dt.toLocaleDateString('en-IN',{day:'2-digit',month:'short'}));
+      cumValues.push(Math.round(running));
+    }
+    document.getElementById('perf14-chart').innerHTML = renderSparkline(dayLabels, cumValues);
   }).catch(()=>{});
 }
 setInterval(refreshPerf14,60000); refreshPerf14();
