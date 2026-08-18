@@ -487,7 +487,7 @@ TEMPLATE = r"""
   <div class="flex items-center justify-between">
     <div>
       <h1 class="text-lg font-bold text-gray-900">Artha Trading Bot</h1>
-      <p class="text-xs text-gray-400">Nifty 50 Options &middot; V2 Strategy &middot; Angel One</p>
+      <p id="hdr-subtitle" class="text-xs text-gray-400">Nifty 50 Options &middot; Supertrend Strategy &middot; Angel One</p>
     </div>
     <div class="flex items-center gap-5">
       <!-- Nifty LTP -->
@@ -574,7 +574,7 @@ TEMPLATE = r"""
     <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold mb-3">Signal Monitor</p>
     <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
       <div>
-        <p class="text-xs text-gray-400 mb-1">India VIX</p>
+        <p id="sig-vix-label" class="text-xs text-gray-400 mb-1">Supertrend</p>
         <p id="sig-vix" class="font-bold text-gray-800">—</p>
       </div>
       <div>
@@ -1023,10 +1023,13 @@ function refreshLive(){
 
     // Strategy badge
     const strategy = (s.config && s.config.strategy) || 'v2';
+    const isST     = strategy === 'supertrend';
     const stBadge  = document.getElementById('strategy-badge');
-    stBadge.textContent = strategy === 'supertrend' ? 'SUPERTREND' : 'V2';
+    stBadge.textContent = isST ? 'SUPERTREND' : 'V2';
     stBadge.className   = 'text-xs font-bold px-3 py-1 rounded-full '+
-      (strategy === 'supertrend' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700');
+      (isST ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700');
+    document.getElementById('hdr-subtitle').textContent =
+      'Nifty 50 Options · '+(isST ? 'Supertrend' : 'V2')+' Strategy · Angel One';
 
     // Buttons
     const isLive  = (status==='LIVE');
@@ -1068,8 +1071,19 @@ function refreshLive(){
     if(mkt.nifty_ltp) document.getElementById('hdr-nifty').textContent='₹'+mkt.nifty_ltp.toFixed(0);
     if(cash)          document.getElementById('hdr-cash') .textContent=inr(cash);
 
-    // Signal monitor
-    document.getElementById('sig-vix') .textContent = mkt.vix ? mkt.vix+'' : '—';
+    // Signal monitor (VIX for V2, Supertrend direction for Supertrend)
+    const vixLabel = document.getElementById('sig-vix-label');
+    const vixVal   = document.getElementById('sig-vix');
+    if(isST){
+      vixLabel.textContent = 'Supertrend';
+      if(mkt.st_trend === 1)       { vixVal.textContent = 'Uptrend ▲';   vixVal.className = 'font-bold text-green-600'; }
+      else if(mkt.st_trend === -1) { vixVal.textContent = 'Downtrend ▼'; vixVal.className = 'font-bold text-red-600'; }
+      else                         { vixVal.textContent = '—';           vixVal.className = 'font-bold text-gray-800'; }
+    } else {
+      vixLabel.textContent = 'India VIX';
+      vixVal.textContent   = mkt.vix ? mkt.vix+'' : '—';
+      vixVal.className     = 'font-bold text-gray-800';
+    }
     const sigEl = document.getElementById('sig-last');
     const sigVal = sig.signal;
     if(sigVal){

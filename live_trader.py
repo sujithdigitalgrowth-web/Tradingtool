@@ -1564,7 +1564,8 @@ class AngelTrader:
             "paper_mode"  : self.paper_mode,
             "config"      : {"max_trades": self.max_trades, "lots": self.lots, "paper": self.paper_mode,
                              "strategy": self.strategy},
-            "market"      : {"nifty_ltp": self.nifty_ltp, "vix": self.sig_info.get("vix")},
+            "market"      : {"nifty_ltp": self.nifty_ltp, "vix": self.sig_info.get("vix"),
+                             "st_trend": self._st_ref.get("value")},
             "signal"      : self.sig_info,
             "position"    : pos,
             "daily_stats" : {
