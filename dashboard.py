@@ -298,38 +298,46 @@ def api_trade_history():
                 if resp and resp.get("status") and resp.get("data"):
                     fills = [r for r in resp["data"] if "NIFTY" in r.get("tradingsymbol", "")
                              and r.get("producttype") == "INTRADAY"]
-                    # Group BUY+SELL pairs by symbol
-                    buys  = {r["tradingsymbol"]: r for r in fills if r.get("transactiontype") == "BUY"}
-                    sells = {r["tradingsymbol"]: r for r in fills if r.get("transactiontype") == "SELL"}
-                    for sym, sell in sells.items():
-                        buy = buys.get(sym)
-                        qty        = int(sell.get("fillsize") or sell.get("quantity") or 0)
-                        exit_fill  = float(sell.get("fillprice") or 0)
-                        entry_fill = float(buy.get("fillprice") or 0) if buy else 0.0
-                        if not qty or not exit_fill:
-                            continue
-                        pnl     = round((exit_fill - entry_fill) * qty, 2) if entry_fill else None
-                        pnl_pct = round((exit_fill - entry_fill) / entry_fill * 100, 2) if entry_fill else None
-                        capital = round(entry_fill * qty, 2) if entry_fill else None
-                        ftime   = sell.get("filltime", "")[:5]
-                        btime   = buy.get("filltime", "")[:5] if buy else ""
-                        records.append({
-                            "date"      : today_str,
-                            "time"      : btime,
-                            "exit_time" : ftime,
-                            "symbol"    : sym,
-                            "side"      : "CE" if sym.endswith("CE") else "PE",
-                            "strike"    : int(sell.get("strikeprice") or 0),
-                            "entry"     : entry_fill,
-                            "exit"      : exit_fill,
-                            "qty"       : qty,
-                            "lots"      : qty // 65,
-                            "capital"   : capital,
-                            "pnl"       : pnl,
-                            "pnl_pct"   : pnl_pct,
-                            "reason"    : "ANGEL_FILL",
-                            "paper"     : False,
-                        })
+                    # Pair each SELL with the oldest still-open BUY of the same symbol
+                    # (FIFO) instead of one dict entry per symbol — the same strike can
+                    # be round-tripped more than once a day, and a last-wins dict silently
+                    # drops/misattributes the earlier trades in that case.
+                    fills.sort(key=lambda r: r.get("filltime", ""))
+                    open_buys = {}
+                    for r in fills:
+                        sym = r.get("tradingsymbol")
+                        if r.get("transactiontype") == "BUY":
+                            open_buys.setdefault(sym, []).append(r)
+                        elif r.get("transactiontype") == "SELL":
+                            queue = open_buys.get(sym)
+                            buy   = queue.pop(0) if queue else None
+                            qty        = int(r.get("fillsize") or r.get("quantity") or 0)
+                            exit_fill  = float(r.get("fillprice") or 0)
+                            entry_fill = float(buy.get("fillprice") or 0) if buy else 0.0
+                            if not qty or not exit_fill:
+                                continue
+                            pnl     = round((exit_fill - entry_fill) * qty, 2) if entry_fill else None
+                            pnl_pct = round((exit_fill - entry_fill) / entry_fill * 100, 2) if entry_fill else None
+                            capital = round(entry_fill * qty, 2) if entry_fill else None
+                            ftime   = r.get("filltime", "")[:5]
+                            btime   = buy.get("filltime", "")[:5] if buy else ""
+                            records.append({
+                                "date"      : today_str,
+                                "time"      : btime,
+                                "exit_time" : ftime,
+                                "symbol"    : sym,
+                                "side"      : "CE" if sym.endswith("CE") else "PE",
+                                "strike"    : int(r.get("strikeprice") or 0),
+                                "entry"     : entry_fill,
+                                "exit"      : exit_fill,
+                                "qty"       : qty,
+                                "lots"      : qty // 65,
+                                "capital"   : capital,
+                                "pnl"       : pnl,
+                                "pnl_pct"   : pnl_pct,
+                                "reason"    : "ANGEL_FILL",
+                                "paper"     : False,
+                            })
         except Exception:
             pass
 
