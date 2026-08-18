@@ -1,6 +1,6 @@
 import json, os, threading, requests as _requests
 from flask import Flask, render_template_string, jsonify, request
-from datetime import datetime, date, timedelta
+from datetime import datetime
 import backtest as bt
 
 def _tg(msg: str):
@@ -19,8 +19,6 @@ def _tg(msg: str):
 
 app = Flask(__name__)
 
-STATE_FILE          = "logs/state.json"
-RANGE_CACHE_FILE    = "logs/range_cache.json"
 TRADING_FLAG_FILE   = "logs/trading_enabled.json"
 TRADING_CONFIG_FILE = "logs/trading_config.json"
 LIVE_STATE_FILE     = "logs/live_state.json"
@@ -375,88 +373,6 @@ def api_trade_history():
         }
     })
 
-# ── API: Backtest (existing) ──────────────────────────────────────
-
-@app.route("/api/state")
-def api_state():
-    return jsonify(load_json(STATE_FILE))
-
-@app.route("/api/run-today", methods=["POST"])
-def api_run_today():
-    try:
-        import backtest
-        from backtest import fetch_range_data_v2, simulate_day, INITIAL_BALANCE
-        cfg = _get_trading_config()
-        backtest.V2_MAX_TRADES = cfg["max_trades"]
-        backtest.QTY           = cfg["lots"] * backtest.LOT_SIZE
-        QTY = backtest.QTY
-        today = date.today()
-        result, target = None, None
-        for delta in range(6):
-            candidate = today - timedelta(days=delta)
-            if candidate.weekday() >= 5:
-                continue
-            try:
-                start = candidate - timedelta(days=40)
-                df_5m, df_1d, df_nbees, df_bnf, df_vix = fetch_range_data_v2(start, candidate)
-                r = simulate_day(candidate, df_5m, df_1d,
-                                 df_nbees=df_nbees, df_bnf=df_bnf, df_vix=df_vix)
-                if r:
-                    result, target = r, candidate
-                    break
-            except Exception:
-                continue
-        if not result:
-            return jsonify({"error": "No data available"}), 404
-        state = {
-            "backtest"       : True,
-            "backtest_date"  : target.strftime("%d %b %Y"),
-            "initial_balance": INITIAL_BALANCE,
-            "final_balance"  : result["final_balance"],
-            "market"         : result["market"],
-            "gann"           : {},
-            "risk"           : {"daily_pnl"  : result["daily_pnl"],
-                                "trade_count": result["trade_count"],
-                                "trades"     : result["trades"]},
-            "position"       : {"active": False, "qty": QTY},
-        }
-        with open(STATE_FILE, "w") as f:
-            json.dump(state, f, indent=2, default=str)
-        return jsonify({"status": "ok", "date": str(target), "result": result})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/api/range-cache")
-def api_range_cache():
-    return jsonify(load_json(RANGE_CACHE_FILE))
-
-@app.route("/api/run-range", methods=["POST"])
-def api_run_range():
-    try:
-        body  = request.json
-        start = date.fromisoformat(body["start"])
-        end   = date.fromisoformat(body["end"])
-        if (end - start).days > 90:
-            return jsonify({"error": "Range too large — max 90 days"}), 400
-        import backtest
-        from backtest import run_range
-        cfg = _get_trading_config()
-        backtest.V2_MAX_TRADES = cfg["max_trades"]
-        backtest.QTY           = cfg["lots"] * backtest.LOT_SIZE
-        results = run_range(start, end)
-        cache = {
-            "start": str(start), "end": str(end),
-            "label": "V2 v2.3 — Live Strategy Parameters",
-            "generated": datetime.now().strftime("%d %b %Y %H:%M"),
-            "results": results,
-        }
-        with open(RANGE_CACHE_FILE, "w") as f:
-            json.dump(cache, f, indent=2, default=str)
-        return jsonify(cache)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
 # ── Template ──────────────────────────────────────────────────────
 
 TEMPLATE = r"""
@@ -467,7 +383,6 @@ TEMPLATE = r"""
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Artha Trading Bot</title>
 <script src="https://cdn.tailwindcss.com"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
   body{background:#f1f5f9;color:#1e293b;font-family:'Courier New',monospace}
   .card{background:#fff;border:1px solid #e2e8f0;border-radius:12px}
@@ -480,9 +395,7 @@ TEMPLATE = r"""
   .badge-stop{background:#fee2e2;color:#dc2626;border:1px solid #fca5a5}
   .badge-mon {background:#fef9c3;color:#ca8a04;border:1px solid #fde047}
   .badge-paper{background:#dbeafe;color:#1d4ed8;border:1px solid #93c5fd}
-  #range-chart-wrap{position:relative;height:260px}
   input[type="date"]{color-scheme:light}
-  .insight-bullet::before{content:"▸ ";color:#3b82f6}
   /* Modal */
   #modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:50;align-items:center;justify-content:center}
   #modal-bg.open{display:flex}
@@ -519,7 +432,6 @@ TEMPLATE = r"""
 <!-- ── Tabs ── -->
 <div class="flex px-6 pt-3 border-b border-gray-200 bg-white">
   <button onclick="switchTab('live')"    id="tab-live"    class="tab-a  px-5 py-2 text-sm font-semibold">Live Trading</button>
-  <button onclick="switchTab('range')"   id="tab-range"   class="tab-i  px-5 py-2 text-sm font-semibold">Backtest Analysis</button>
   <button onclick="switchTab('history')" id="tab-history" class="tab-i  px-5 py-2 text-sm font-semibold">Trade History</button>
 </div>
 
@@ -676,72 +588,6 @@ TEMPLATE = r"""
   </div>
 
 </div><!-- /pane-live -->
-
-
-<!-- ══════════════ BACKTEST TAB ══════════════ -->
-<div id="pane-range" class="p-5 hidden space-y-4">
-
-  <!-- Controls -->
-  <div class="card p-4">
-    <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold mb-3">Run Backtest</p>
-    <div class="flex flex-wrap items-end gap-4">
-      <div>
-        <label class="text-xs text-gray-400 block mb-1">Start Date</label>
-        <input id="range-start" type="date" value="2026-05-01"
-          class="bg-white border border-gray-300 rounded px-3 py-2 text-sm"/>
-      </div>
-      <div>
-        <label class="text-xs text-gray-400 block mb-1">End Date</label>
-        <input id="range-end" type="date" value="2026-05-21"
-          class="bg-white border border-gray-300 rounded px-3 py-2 text-sm"/>
-      </div>
-      <button onclick="runRange()"
-        class="bg-gray-900 hover:bg-gray-700 text-white text-sm font-semibold px-5 py-2 rounded transition">
-        Run Backtest
-      </button>
-      <span id="range-status" class="text-xs text-gray-400 self-center"></span>
-    </div>
-  </div>
-
-  <!-- Summary -->
-  <div id="range-summary" class="hidden space-y-4">
-    <div class="flex items-center justify-between">
-      <p id="rs-label" class="text-xs font-semibold text-gray-500 uppercase tracking-widest"></p>
-      <p id="rs-summary" class="text-xs text-gray-400"></p>
-    </div>
-    <div class="grid grid-cols-2 md:grid-cols-5 gap-4">
-      <div class="card p-4"><p class="text-xs text-gray-400 mb-1">Total P&amp;L</p><p id="rs-pnl" class="text-xl font-bold">—</p></div>
-      <div class="card p-4"><p class="text-xs text-gray-400 mb-1">Trading Days</p><p id="rs-days" class="text-xl font-bold text-gray-900">—</p></div>
-      <div class="card p-4"><p class="text-xs text-gray-400 mb-1">Win Days</p><p id="rs-win" class="text-xl font-bold text-green-600">—</p></div>
-      <div class="card p-4"><p class="text-xs text-gray-400 mb-1">Best Day</p><p id="rs-best" class="text-xl font-bold text-green-600">—</p></div>
-      <div class="card p-4"><p class="text-xs text-gray-400 mb-1">Worst Day</p><p id="rs-worst" class="text-xl font-bold text-red-500">—</p></div>
-    </div>
-    <div class="card p-4">
-      <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold mb-3">Daily P&amp;L — click a bar for details</p>
-      <div id="range-chart-wrap"><canvas id="range-chart"></canvas></div>
-    </div>
-    <div id="day-detail" class="card p-5 hidden">
-      <div class="flex items-center justify-between mb-4">
-        <h2 id="dd-title" class="text-base font-bold text-gray-900"></h2>
-        <span id="dd-pnl" class="text-lg font-bold"></span>
-      </div>
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs mb-4">
-        <div class="bg-gray-50 rounded p-3"><p class="text-gray-400 mb-1">Open</p><p id="dd-open" class="font-bold text-gray-900"></p></div>
-        <div class="bg-gray-50 rounded p-3"><p class="text-gray-400 mb-1">High</p><p id="dd-high" class="font-bold text-green-600"></p></div>
-        <div class="bg-gray-50 rounded p-3"><p class="text-gray-400 mb-1">Low</p><p id="dd-low" class="font-bold text-red-500"></p></div>
-        <div class="bg-gray-50 rounded p-3"><p class="text-gray-400 mb-1">Close</p><p id="dd-close" class="font-bold text-gray-900"></p></div>
-      </div>
-      <div class="mb-4">
-        <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold mb-2">Insights</p>
-        <ul id="dd-insights" class="space-y-1 text-sm text-gray-600"></ul>
-      </div>
-      <div>
-        <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold mb-2">Trades (<span id="dd-tc">0</span>)</p>
-        <div id="dd-trades"></div>
-      </div>
-    </div>
-  </div>
-</div><!-- /pane-range -->
 
 
 <!-- ══════════════ TRADE HISTORY TAB ══════════════ -->
@@ -903,12 +749,11 @@ setInterval(tick,1000); tick();
 
 // ── Tabs ───────────────────────────────────────────────────────
 function switchTab(name){
-  ['live','range','history'].forEach(t=>{
+  ['live','history'].forEach(t=>{
     document.getElementById('pane-'+t).classList.toggle('hidden',t!==name);
     document.getElementById('tab-'+t).className=
       (t===name?'tab-a':'tab-i')+' px-5 py-2 text-sm font-semibold';
   });
-  if(name==='range') loadRangeCache();
 }
 
 // ── Trade History ──────────────────────────────────────────────
@@ -1325,101 +1170,6 @@ document.getElementById('modal-bg').addEventListener('click',function(e){
   if(e.target===this) closeModal();
 });
 
-// ── Backtest tab ───────────────────────────────────────────────
-let rangeChart=null, rangeResults=[];
-
-function loadRangeCache(){
-  fetch('/api/range-cache').then(r=>r.json()).then(cache=>{
-    if(cache.results&&cache.results.length){
-      document.getElementById('range-status').textContent='Last run: '+(cache.generated||'');
-      renderRange(cache.results,cache.label||'');
-    }
-  }).catch(()=>{});
-}
-
-function runRange(){
-  const start=document.getElementById('range-start').value;
-  const end  =document.getElementById('range-end').value;
-  if(!start||!end) return;
-  const btn=document.querySelector('button[onclick="runRange()"]');
-  btn.disabled=true; btn.textContent='Running…';
-  document.getElementById('range-status').textContent='Fetching & simulating…';
-  document.getElementById('range-summary').classList.add('hidden');
-  fetch('/api/run-range',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({start,end})})
-  .then(r=>r.json()).then(cache=>{
-    btn.disabled=false; btn.textContent='Run Backtest';
-    if(cache.error){document.getElementById('range-status').textContent='Error: '+cache.error;return;}
-    document.getElementById('range-status').textContent='Done — '+cache.results.length+' trading days';
-    renderRange(cache.results,cache.label||'');
-  }).catch(err=>{btn.disabled=false;btn.textContent='Run Backtest';
-    document.getElementById('range-status').textContent='Error: '+err;});
-}
-
-function renderRange(results,label){
-  if(!results||!results.length) return;
-  rangeResults=results;
-  document.getElementById('range-summary').classList.remove('hidden');
-  document.getElementById('day-detail').classList.add('hidden');
-  const pnls=results.map(r=>r.daily_pnl);
-  const total=pnls.reduce((a,b)=>a+b,0);
-  const winDays=pnls.filter(p=>p>0).length;
-  const loseDays=pnls.filter(p=>p<0).length;
-  const trades=results.reduce((a,r)=>a+(r.trade_count||0),0);
-  const wins  =results.reduce((a,r)=>a+(r.win_count  ||0),0);
-  document.getElementById('rs-label').textContent=label||'Backtest Results';
-  document.getElementById('rs-summary').textContent=
-    trades+' trades · '+wins+' winners ('+
-    (trades?Math.round(wins/trades*100):0)+'%) · '+winDays+'W / '+loseDays+'L days';
-  const tEl=document.getElementById('rs-pnl');
-  tEl.textContent=(total>=0?'+':'')+inr(total);
-  tEl.className='text-xl font-bold '+cls(total);
-  document.getElementById('rs-days') .textContent=results.length;
-  document.getElementById('rs-win')  .textContent=winDays+' / '+results.length;
-  document.getElementById('rs-best') .textContent='+'+inr(Math.max(...pnls));
-  document.getElementById('rs-worst').textContent='-'+inr(Math.abs(Math.min(...pnls)));
-  const labels=results.map(r=>{const d=new Date(r.date);
-    return d.toLocaleDateString('en-IN',{day:'2-digit',month:'short'});});
-  if(rangeChart){rangeChart.destroy();rangeChart=null;}
-  rangeChart=new Chart(document.getElementById('range-chart').getContext('2d'),{
-    type:'bar',
-    data:{labels,datasets:[{label:'Daily P&L (₹)',data:pnls,
-      backgroundColor:pnls.map(p=>p>=0?'rgba(34,197,94,.85)':'rgba(239,68,68,.85)'),
-      borderColor:pnls.map(p=>p>=0?'rgba(34,197,94,1)':'rgba(239,68,68,1)'),
-      borderWidth:1,borderRadius:3}]},
-    options:{responsive:true,maintainAspectRatio:false,
-      onClick:(e,els)=>{if(els.length)showDay(rangeResults[els[0].index]);},
-      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>{
-        const v=c.raw;return' '+(v>=0?'+':'')+'₹'+Math.abs(v).toLocaleString('en-IN',{minimumFractionDigits:2});
-      }}}},
-      scales:{x:{ticks:{color:'#6b7280',font:{size:10}},grid:{color:'#f1f5f9'}},
-              y:{ticks:{color:'#6b7280',font:{size:10},
-                   callback:v=>(v>=0?'+':'')+'₹'+Math.abs(v).toLocaleString('en-IN')},
-                 grid:{color:'#f1f5f9'}}}}});
-}
-
-function showDay(r){
-  const p=document.getElementById('day-detail');
-  p.classList.remove('hidden');
-  p.scrollIntoView({behavior:'smooth',block:'start'});
-  const d=new Date(r.date);
-  document.getElementById('dd-title').textContent=
-    d.toLocaleDateString('en-IN',{weekday:'long',day:'2-digit',month:'long',year:'numeric'});
-  const pEl=document.getElementById('dd-pnl');
-  pEl.textContent=(r.daily_pnl>=0?'+':'')+inr(r.daily_pnl);
-  pEl.className='text-lg font-bold '+cls(r.daily_pnl);
-  const m=r.market||{};
-  document.getElementById('dd-open') .textContent='₹'+(m.open ||0).toFixed(2);
-  document.getElementById('dd-high') .textContent='₹'+(m.high ||0).toFixed(2);
-  document.getElementById('dd-low')  .textContent='₹'+(m.low  ||0).toFixed(2);
-  document.getElementById('dd-close').textContent='₹'+(m.close||0).toFixed(2);
-  document.getElementById('dd-insights').innerHTML=
-    (r.insights||[]).map(i=>`<li class="insight-bullet text-sm text-gray-600">${i}</li>`).join('')||
-    '<li class="text-gray-400">No insights.</li>';
-  const tds=r.trades||[];
-  document.getElementById('dd-tc').textContent=tds.length;
-  document.getElementById('dd-trades').innerHTML=tradeTable(tds);
-}
 </script>
 </body>
 </html>
