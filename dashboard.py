@@ -577,6 +577,33 @@ TEMPLATE = r"""
     </div>
   </div>
 
+  <!-- ── 14-Day Performance ── -->
+  <div class="card p-4">
+    <div class="flex items-center justify-between mb-4">
+      <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold">14-Day Performance</p>
+      <span id="perf14-total" class="text-xs text-gray-400">— trades</span>
+    </div>
+    <div class="flex items-center gap-6">
+      <div class="text-center shrink-0">
+        <p id="perf14-winrate" class="text-3xl font-bold text-gray-300">—</p>
+        <p class="text-xs text-gray-400 mt-1">Win Rate</p>
+      </div>
+      <div class="flex-1 min-w-0">
+        <div id="perf14-bar" class="flex h-3 rounded-full overflow-hidden bg-gray-100 w-full"></div>
+        <div class="flex justify-between mt-2 text-xs">
+          <span class="flex items-center gap-1.5 text-gray-600">
+            <span class="w-2 h-2 rounded-full bg-green-500 inline-block"></span>
+            <span id="perf14-wins">0 wins</span>
+          </span>
+          <span class="flex items-center gap-1.5 text-gray-600">
+            <span class="w-2 h-2 rounded-full bg-red-500 inline-block"></span>
+            <span id="perf14-losses">0 losses</span>
+          </span>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- ── Signal Monitor ── -->
   <div class="card p-4">
     <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold mb-3">Signal Monitor</p>
@@ -1180,6 +1207,33 @@ function refreshBalance(){
   }).catch(()=>{});
 }
 setInterval(refreshBalance,30000); refreshBalance();
+
+// 14-day win/loss performance (slow-moving — refresh every 60s)
+function refreshPerf14(){
+  const to   = new Date();
+  const from = new Date(to.getTime() - 13*24*60*60*1000);
+  const fmt  = d => d.toISOString().slice(0,10);
+  fetch(`/api/trade-history?from=${fmt(from)}&to=${fmt(to)}`).then(r=>r.json()).then(d=>{
+    const s      = d.summary || {};
+    const wins   = s.wins   || 0;
+    const losses = s.losses || 0;
+    const total  = s.total_trades || 0;
+    document.getElementById('perf14-total').textContent = total+' trade'+(total===1?'':'s');
+    const wrEl = document.getElementById('perf14-winrate');
+    wrEl.textContent = total ? s.win_rate+'%' : '—';
+    wrEl.className   = 'text-3xl font-bold '+
+      (!total ? 'text-gray-300' : s.win_rate>=50 ? 'text-green-600' : 'text-red-600');
+    document.getElementById('perf14-wins').textContent   = wins+' win'+(wins===1?'':'s');
+    document.getElementById('perf14-losses').textContent = losses+' loss'+(losses===1?'':'es');
+    const winPct  = total ? (wins/total*100)   : 0;
+    const lossPct = total ? (losses/total*100) : 0;
+    document.getElementById('perf14-bar').innerHTML = !total ? '' :
+      `<div style="width:${winPct}%" class="bg-green-500"></div>`+
+      `<div style="width:2px" class="bg-white"></div>`+
+      `<div style="width:${lossPct}%" class="bg-red-500"></div>`;
+  }).catch(()=>{});
+}
+setInterval(refreshPerf14,60000); refreshPerf14();
 
 // ── Start Trading Modal ───────────────────────────────────────
 function openStartModal(){
