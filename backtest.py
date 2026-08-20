@@ -44,6 +44,31 @@ V2_EMA_EXIT_CONFIRM_CANDLES = 2   # consecutive closed candles crossed back thro
 ST6_PERIOD   = 10    # Supertrend period
 ST6_MULT     = 3.0   # Supertrend multiplier
 ST6_SPOT_SL  = 50     # points adverse spot move -> immediate stop, no confirmation
+ST6_STEP1_TRIGGER      = 0.15  # once peak option gain hits +15%, floor steps to
+                                 # ST6_STEP1_FLOOR (breakeven) -- guarantees a
+                                 # trade that got this far can't turn into a real
+                                 # loss for the day.
+ST6_STEP1_FLOOR        = 0.00
+ST6_STEP2_TRIGGER      = 0.25  # once peak hits +25%, floor steps to ST6_STEP2_FLOOR.
+ST6_STEP2_FLOOR        = 0.10
+ST6_TRAIL_LOCK_TRIGGER = 0.32  # once peak hits +32%, floor switches from the fixed
+                                 # steps above to a continuous peak-GIVEBACK trail
+                                 # (never a step back down -- always >= the 25% floor).
+                                 # Backtested 45d (Aug 2026): this 3-tier "hybrid"
+                                 # nets Rs.43,905 vs Rs.33,562 doing nothing, and
+                                 # guarantees no trade that touched +15% closes as a
+                                 # loss -- at a cost of ~Rs.8,000/45d vs the simpler
+                                 # 32%-only version (Rs.51,905), which has higher
+                                 # expected P&L but no such guarantee below 32%.
+                                 # Chosen deliberately over the higher-EV pure
+                                 # version for the loss-guarantee (see
+                                 # supertrend_45day_trail_backtest.py).
+ST6_TRAIL_GIVEBACK     = 0.03  # once past ST6_TRAIL_LOCK_TRIGGER, exit if price
+                                 # pulls back more than this many points from peak.
+                                 # A partial-exit-at-10% variant was also tested
+                                 # and consistently LOST money vs no partial --
+                                 # letting the full qty run is what captures the
+                                 # big trending days.
 
 # ── V2 Strategy constants ─────────────────────────────────────────
 V2_TP_OPTION_PCT   = 0.20   # 2-lot: remaining lot hard TP at +20%

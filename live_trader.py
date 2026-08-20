@@ -1329,9 +1329,18 @@ class AngelTrader:
 
     def _manage_position_supertrend(self, pos):
         """
-        Strategy 6 exit logic — matches supertrend_45day_sl_backtest.py:
+        Strategy 6 exit logic — matches supertrend_45day_trail_backtest.py:
         (1) 50-point adverse spot move -> immediate stop, no confirmation;
-        (2) Supertrend flip against the position. EOD square-off is handled
+        (2) 3-tier profit floor, always the max of whichever tier applies —
+            never steps back down as peak_pct rises past a tier boundary:
+              peak >= 15% -> floor = breakeven (a trade that got this far
+                              can never close as a real loss for the day)
+              peak >= 25% -> floor = +10%
+              peak >= 32% -> floor = peak - GIVEBACK(3pts), continuous, no cap
+            Chosen over the higher-EV "32%-only" version for the loss
+            guarantee below 32% — backtested 45d (Aug 2026): Rs.43,905 vs
+            Rs.33,562 doing nothing (Rs.51,905 for 32%-only, no guarantee);
+        (3) Supertrend flip against the position. EOD square-off is handled
         by the shared check in _manage_position before this is called.
         """
         tok  = pos["token"]
@@ -1344,6 +1353,8 @@ class AngelTrader:
             with self._lock:
                 self.position["live_ltp"] = round(ltp, 2)
                 self.position["live_pnl"] = round((ltp - pos["entry_price"]) * pos["qty"], 2)
+                if ltp > pos["trail_high"]:
+                    self.position["trail_high"] = ltp
 
         current_spot = self.get_nifty_ltp()
         entry_spot   = pos.get("entry_spot", 0.0)
@@ -1353,6 +1364,22 @@ class AngelTrader:
             if adverse >= bt.ST6_SPOT_SL:
                 self._exit("ST_SPOT_SL", ltp)
                 return
+
+        entry = pos["entry_price"]
+        if ltp is not None and entry > 0:
+            peak_pct = (pos["trail_high"] - entry) / entry
+            floor_pct = None
+            if peak_pct >= bt.ST6_TRAIL_LOCK_TRIGGER:
+                floor_pct = peak_pct - bt.ST6_TRAIL_GIVEBACK
+            elif peak_pct >= bt.ST6_STEP2_TRIGGER:
+                floor_pct = bt.ST6_STEP2_FLOOR
+            elif peak_pct >= bt.ST6_STEP1_TRIGGER:
+                floor_pct = bt.ST6_STEP1_FLOOR
+            if floor_pct is not None:
+                opt_pct = (ltp - entry) / entry
+                if opt_pct <= floor_pct:
+                    self._exit("ST_TRAIL_EXIT", ltp)
+                    return
 
         st_ts = self._st_ref.get("ts")
         if st_ts is not None and st_ts != pos.get("st_last_candle_ts"):
