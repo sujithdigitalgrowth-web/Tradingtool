@@ -68,9 +68,10 @@ from angel_data import (
 )
 
 # ── File paths ────────────────────────────────────────────────────
-SCRIP_CACHE      = "logs/scrip_nfo.json"
-LIVE_STATE_FILE  = "logs/live_state.json"
-TRADE_LOG_FILE   = "logs/trade_history.json"
+SCRIP_CACHE       = "logs/scrip_nfo.json"
+LIVE_STATE_FILE   = "logs/live_state.json"
+TRADE_LOG_FILE    = "logs/trade_history.json"
+TEST_ORDER_ID_FILE = "logs/test_order_ids.json"
 
 
 def _append_trade_log(record: dict):
@@ -89,6 +90,26 @@ def _append_trade_log(record: dict):
         os.replace(tmp, TRADE_LOG_FILE)
     except Exception as e:
         logger.warning(f"trade_log append error: {e}")
+
+
+def _mark_test_order(order_id):
+    """Record a broker order ID placed by the ⚡ Test Trade button, so the
+    dashboard can exclude its real Angel One fills from trade history/stats."""
+    if not order_id or order_id == "—":
+        return
+    os.makedirs("logs", exist_ok=True)
+    try:
+        ids = []
+        if os.path.exists(TEST_ORDER_ID_FILE):
+            with open(TEST_ORDER_ID_FILE) as f:
+                ids = json.load(f)
+        ids.append(str(order_id))
+        tmp = TEST_ORDER_ID_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(ids, f)
+        os.replace(tmp, TEST_ORDER_ID_FILE)
+    except Exception as e:
+        logger.warning(f"test_order_id log error: {e}")
 
 # ── Timing ────────────────────────────────────────────────────────
 SQUAREOFF_TIME  = "15:15"
@@ -809,7 +830,7 @@ class AngelTrader:
 
     # ── Entry ─────────────────────────────────────────────────────
 
-    def _enter(self, signal, force_strike=None):
+    def _enter(self, signal, force_strike=None, is_test=False):
         opt_type = "CE" if signal == "BUY_CE" else "PE"
         spot     = self.get_nifty_ltp()
         if not spot:
@@ -919,6 +940,8 @@ class AngelTrader:
                             break
             except Exception as e:
                 logger.warning(f"Could not fetch entry fill price: {e}")
+            if is_test:
+                _mark_test_order(order_id)
 
         with self._lock:
             self.position = {
@@ -941,6 +964,7 @@ class AngelTrader:
                 "live_pnl"     : 0.0,
                 "order_id"     : order_id,
                 "paper"        : self.paper_mode,
+                "is_test"      : is_test,
                 "realized_pnl" : 0.0,
                 "sl_warn_count"     : 0,   # consecutive polls in premium backstop zone
                 "spot_sl_warn_count": 0,   # consecutive polls with spot beyond SL threshold
@@ -952,7 +976,7 @@ class AngelTrader:
             self.last_signal = "buy" if signal == "BUY_CE" else "sell"
 
         lots = qty // bt.LOT_SIZE
-        tag  = "[PAPER] " if self.paper_mode else ""
+        tag  = ("[TEST] " if is_test else "") + ("[PAPER] " if self.paper_mode else "")
         logger.info(f"{tag}Position opened: {symbol} {qty}@{entry_ltp}")
         self._log_activity("entry", f"{tag}BUY {opt_type} — {symbol} @ ₹{entry_ltp:.2f} ({lots} lot{'s' if lots!=1 else ''})")
         _tg(f"{'📋' if self.paper_mode else '🟢'} <b>{tag}TRADE ENTRY</b>\n"
@@ -1011,6 +1035,8 @@ class AngelTrader:
                             break
             except Exception as e:
                 logger.warning(f"Could not fetch fill price: {e}")
+            if pos.get("is_test"):
+                _mark_test_order(sell_order_id)
 
         self._stop_ws_feed()
         pnl     = round((ltp - pos["entry_price"]) * pos["qty"], 2)
@@ -1034,27 +1060,31 @@ class AngelTrader:
             "pnl_pct"   : pnl_pct,
             "reason"    : reason,
             "paper"     : self.paper_mode,
+            "is_test"   : pos.get("is_test", False),
         }
+        is_test = pos.get("is_test", False)
         total_trade_pnl = pos.get("realized_pnl", 0.0) + pnl
         with self._lock:
-            self.trades.append(trade_record)
-            self.daily_pnl   += pnl
-            self.trade_count += 1
-            if pnl > 0:
-                self.win_count += 1
+            if not is_test:
+                self.trades.append(trade_record)
+                self.daily_pnl   += pnl
+                self.trade_count += 1
+                if pnl > 0:
+                    self.win_count += 1
             self.position  = _empty_pos()
             self.last_signal = None
-            if self.loss_cooldown_candles > 0 and total_trade_pnl < 0:
+            if not is_test and self.loss_cooldown_candles > 0 and total_trade_pnl < 0:
                 direction = "buy" if pos["side"] == "CE" else "sell"
                 self._cooldown_remaining[direction] = self.loss_cooldown_candles
 
-        if self.loss_cooldown_candles > 0 and total_trade_pnl < 0:
+        if not is_test and self.loss_cooldown_candles > 0 and total_trade_pnl < 0:
             logger.warning(f"Loss cooldown: blocking new {pos['side']} entries for "
                            f"{self.loss_cooldown_candles} closed candle(s) (trade pnl=₹{total_trade_pnl:,.2f})")
 
-        _append_trade_log(trade_record)
+        if not is_test:
+            _append_trade_log(trade_record)
 
-        tag  = "[PAPER] " if self.paper_mode else ""
+        tag  = ("[TEST] " if is_test else "") + ("[PAPER] " if self.paper_mode else "")
         icon = "✅" if pnl >= 0 else "🔴"
         logger.info(f"{tag}Position closed: {reason} ltp={ltp} pnl={pnl}")
         self._log_activity("exit" if pnl >= 0 else "exit_loss",

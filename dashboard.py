@@ -207,7 +207,7 @@ def api_test_trade():
 
         body = request.get_json(force=True, silent=True) or {}
         force_strike = int(body["strike"]) if body.get("strike") else None
-        entered = t._enter("BUY_CE", force_strike=force_strike)
+        entered = t._enter("BUY_CE", force_strike=force_strike, is_test=True)
         if not entered:
             err = t.last_error or "Entry failed — check logs"
             return jsonify({"error": err}), 500
@@ -276,7 +276,18 @@ def api_set_config():
 
 # ── API: Trade History ───────────────────────────────────────────
 
-TRADE_LOG_FILE = "logs/trade_history.json"
+TRADE_LOG_FILE     = "logs/trade_history.json"
+TEST_ORDER_ID_FILE = "logs/test_order_ids.json"
+
+def _load_test_order_ids():
+    """Order IDs placed by the ⚡ Test Trade button — excluded from trade history/stats."""
+    try:
+        if os.path.exists(TEST_ORDER_ID_FILE):
+            with open(TEST_ORDER_ID_FILE) as f:
+                return set(str(x) for x in json.load(f))
+    except Exception:
+        pass
+    return set()
 
 @app.route("/api/trade-history")
 def api_trade_history():
@@ -285,6 +296,7 @@ def api_trade_history():
     today_str = datetime.now().strftime("%Y-%m-%d")
 
     records = []
+    test_order_ids = _load_test_order_ids()
 
     # ── Today: pull directly from Angel One tradeBook (fill prices) ──
     today_in_range = (not from_date or from_date <= today_str) and (not to_date or to_date >= today_str)
@@ -295,7 +307,8 @@ def api_trade_history():
                 resp = t._obj.tradeBook()
                 if resp and resp.get("status") and resp.get("data"):
                     fills = [r for r in resp["data"] if "NIFTY" in r.get("tradingsymbol", "")
-                             and r.get("producttype") == "INTRADAY"]
+                             and r.get("producttype") == "INTRADAY"
+                             and str(r.get("orderid")) not in test_order_ids]
                     # Pair each SELL with the oldest still-open BUY of the same symbol
                     # (FIFO) instead of one dict entry per symbol — the same strike can
                     # be round-tripped more than once a day, and a last-wins dict silently
@@ -345,6 +358,8 @@ def api_trade_history():
             with open(TRADE_LOG_FILE) as f:
                 all_trades = json.load(f)
             for tr in all_trades:
+                if tr.get("is_test"):
+                    continue   # test trades never count toward history/stats
                 d = tr.get("date", "")
                 if d == today_str:
                     continue   # today is covered by Angel One above
@@ -447,75 +462,119 @@ TEMPLATE = r"""
 <!-- ══════════════ LIVE TAB ══════════════ -->
 <div id="pane-live" class="p-5 space-y-4">
 
-  <!-- ── Hero: Bot Card ── -->
-  <div class="hero-card p-5">
-    <div class="flex flex-wrap items-start justify-between gap-5">
-      <div class="min-w-0">
-        <div class="flex items-center gap-3 flex-wrap">
-          <h1 class="text-xl font-extrabold text-gray-900 tracking-tight">ARTHA BOT</h1>
-          <span id="status-badge" class="badge-stop text-xs font-bold px-3 py-1 rounded-full">STOPPED</span>
-        </div>
-        <p id="hero-subtitle" class="text-xs text-gray-500 mt-1">Supertrend Strategy &middot; Nifty 50 Options</p>
+  <!-- ── Top row: live trade panel (left, empty until a trade is on) + Bot card (right, square) ── -->
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
 
-        <div class="mt-4">
-          <p class="text-xs text-gray-400">Today's P&amp;L</p>
-          <p id="live-pnl" class="text-3xl font-extrabold text-gray-300">—</p>
-          <p class="text-xs text-gray-400 mt-0.5">Real-time performance</p>
-        </div>
+    <!-- ═══ LEFT: live trade details ═══ -->
+    <div class="lg:col-span-2">
 
-        <div class="flex flex-wrap gap-2 mt-4">
-          <div class="pill px-3 py-2 flex items-center gap-2">
-            <span class="icon-chip bg-blue-100 text-blue-600"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"/><path d="M6 20v-6"/><path d="M12 20V9"/><path d="M18 20V4"/></svg></span>
-            <div><p id="live-lots" class="text-sm font-bold text-gray-900 leading-none">—</p>
-            <p class="text-[10px] text-gray-400 mt-0.5">Position Size</p></div>
-          </div>
-          <div class="pill px-3 py-2 flex items-center gap-2">
-            <span class="icon-chip bg-violet-100 text-violet-600"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2.1l4 4-4 4"/><path d="M3 12.2v-2a4 4 0 0 1 4-4h14"/><path d="M7 21.9l-4-4 4-4"/><path d="M21 11.8v2a4 4 0 0 1-4 4H3"/></svg></span>
-            <div><p id="live-trades-ct" class="text-sm font-bold text-gray-900 leading-none">—</p>
-            <p class="text-[10px] text-gray-400 mt-0.5">Trades Today</p></div>
-          </div>
-          <div class="pill px-3 py-2 flex items-center gap-2">
-            <span class="icon-chip bg-green-100 text-green-600"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1" fill="currentColor"/></svg></span>
-            <div><p id="hero-wr14" class="text-sm font-bold text-gray-900 leading-none">—</p>
-            <p class="text-[10px] text-gray-400 mt-0.5">14D Win Rate</p></div>
-          </div>
+      <!-- ── Empty state (shown until the bot takes a trade) ── -->
+      <div id="pos-empty" class="card p-5 h-full min-h-[260px] flex items-center justify-center text-center">
+        <div>
+          <p class="text-sm font-semibold text-gray-400">No active trade</p>
+          <p class="text-xs text-gray-400 mt-1">Trade details will appear here once the bot enters a position.</p>
         </div>
       </div>
 
-      <div class="flex flex-col items-end gap-2">
-        <div class="flex gap-2">
-          <button id="btn-start" onclick="openStartModal()"
-            class="btn-primary text-white text-sm font-bold px-5 py-2.5 rounded-xl transition">
-            ▶ Start Bot
-          </button>
-          <button id="btn-exit" onclick="manualExitPosition()" style="display:none"
-            class="bg-white border border-red-200 text-red-600 hover:bg-red-50 text-sm font-bold px-5 py-2.5 rounded-xl transition">
-            ✕ Exit Trade
-          </button>
-          <button id="btn-stop" onclick="stopTrading()" style="display:none"
-            class="bg-red-600 hover:bg-red-700 text-white text-sm font-bold px-5 py-2.5 rounded-xl transition">
-            ■ Stop Bot
-          </button>
-          <button id="btn-force" onclick="forceExit()" style="display:none"
-            class="bg-orange-500 hover:bg-orange-600 text-white text-sm font-bold px-5 py-2.5 rounded-xl transition">
-            ⚠ Force Exit
-          </button>
-          <button id="btn-test" onclick="testTrade()" style="display:none"
-            class="bg-white border border-violet-200 text-violet-700 hover:bg-violet-50 text-sm font-bold px-5 py-2.5 rounded-xl transition">
-            ⚡ Test Trade
-          </button>
+      <!-- ── Active Position ── -->
+      <div id="pos-card" class="card p-5 hidden h-full">
+        <div class="flex items-center justify-between mb-4">
+          <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold">Open Position</p>
+          <div class="flex items-center gap-2">
+            <span id="pos-badge" class="text-xs font-bold px-2.5 py-0.5 rounded-full bg-blue-100 text-blue-700">CE</span>
+            <button onclick="manualExitPosition()"
+              class="text-xs font-bold px-3 py-1 rounded-full bg-red-100 text-red-700 hover:bg-red-200 transition">
+              ✕ Exit Trade
+            </button>
+          </div>
         </div>
-        <div class="flex items-center gap-2">
-          <span id="paper-badge" class="hidden text-xs font-bold px-3 py-1 rounded-full bg-blue-100 text-blue-700">PAPER</span>
-          <span id="strategy-badge" class="text-xs font-bold px-3 py-1 rounded-full bg-violet-100 text-violet-700">V2</span>
+        <div class="flex items-center justify-between flex-wrap gap-3 pb-4 border-b border-gray-100">
+          <div>
+            <p id="pos-sym" class="text-base font-bold text-gray-900"></p>
+            <p class="text-xs text-gray-400">Qty <span id="pos-qty" class="font-semibold text-gray-600"></span>
+              &middot; Entry <span id="pos-time" class="font-semibold text-gray-600"></span></p>
+          </div>
+          <div class="text-right">
+            <p id="pos-pnl" class="text-2xl font-extrabold"></p>
+            <p id="pos-pnl-pct" class="text-xs font-semibold"></p>
+          </div>
         </div>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm pt-3">
+          <div><p class="text-xs text-gray-400 mb-0.5">LTP</p><p id="pos-ltp" class="font-bold text-gray-900"></p></div>
+          <div><p class="text-xs text-gray-400 mb-0.5">Stop Loss</p><p id="pos-sl" class="font-bold text-red-600"></p></div>
+          <div><p class="text-xs text-gray-400 mb-0.5">Target</p><p id="pos-target" class="font-bold text-green-600"></p></div>
+          <div><p class="text-xs text-gray-400 mb-0.5">Invested</p><p id="pos-invested" class="font-bold text-gray-700"></p></div>
+        </div>
+        <div id="pos-tags" class="flex gap-2 mt-3"></div>
+      </div>
+
+    </div>
+
+    <!-- ═══ RIGHT: Bot Card (square) ═══ -->
+    <div class="hero-card p-5 flex flex-col">
+      <div class="flex items-center justify-between gap-2 flex-wrap">
+        <h1 class="text-xl font-extrabold text-gray-900 tracking-tight">ARTHA BOT</h1>
+        <span id="status-badge" class="badge-stop text-xs font-bold px-3 py-1 rounded-full">STOPPED</span>
+      </div>
+      <p id="hero-subtitle" class="text-xs text-gray-500 mt-1">Supertrend Strategy &middot; Nifty 50 Options</p>
+
+      <div class="flex gap-2 mt-4 flex-wrap">
+        <button id="btn-start" onclick="openStartModal()"
+          class="btn-primary text-white text-sm font-bold px-5 py-2.5 rounded-xl transition">
+          ▶ Start Bot
+        </button>
+        <button id="btn-exit" onclick="manualExitPosition()" style="display:none"
+          class="bg-white border border-red-200 text-red-600 hover:bg-red-50 text-sm font-bold px-5 py-2.5 rounded-xl transition">
+          ✕ Exit Trade
+        </button>
+        <button id="btn-stop" onclick="stopTrading()" style="display:none"
+          class="bg-red-600 hover:bg-red-700 text-white text-sm font-bold px-5 py-2.5 rounded-xl transition">
+          ■ Stop Bot
+        </button>
+        <button id="btn-force" onclick="forceExit()" style="display:none"
+          class="bg-orange-500 hover:bg-orange-600 text-white text-sm font-bold px-5 py-2.5 rounded-xl transition">
+          ⚠ Force Exit
+        </button>
+        <button id="btn-test" onclick="testTrade()" style="display:none"
+          class="bg-white border border-violet-200 text-violet-700 hover:bg-violet-50 text-sm font-bold px-5 py-2.5 rounded-xl transition">
+          ⚡ Test Trade
+        </button>
+      </div>
+      <div class="flex items-center gap-2 mt-2">
+        <span id="paper-badge" class="hidden text-xs font-bold px-3 py-1 rounded-full bg-blue-100 text-blue-700">PAPER</span>
+        <span id="strategy-badge" class="text-xs font-bold px-3 py-1 rounded-full bg-violet-100 text-violet-700">V2</span>
+      </div>
+
+      <div class="mt-4">
+        <p class="text-xs text-gray-400">Today's P&amp;L</p>
+        <p id="live-pnl" class="text-3xl font-extrabold text-gray-300">—</p>
+        <p class="text-xs text-gray-400 mt-0.5">Real-time performance</p>
+      </div>
+
+      <div class="flex flex-wrap gap-2 mt-4">
+        <div class="pill px-3 py-2 flex items-center gap-2">
+          <span class="icon-chip bg-blue-100 text-blue-600"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"/><path d="M6 20v-6"/><path d="M12 20V9"/><path d="M18 20V4"/></svg></span>
+          <div><p id="live-lots" class="text-sm font-bold text-gray-900 leading-none">—</p>
+          <p class="text-[10px] text-gray-400 mt-0.5">Position Size</p></div>
+        </div>
+        <div class="pill px-3 py-2 flex items-center gap-2">
+          <span class="icon-chip bg-violet-100 text-violet-600"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2.1l4 4-4 4"/><path d="M3 12.2v-2a4 4 0 0 1 4-4h14"/><path d="M7 21.9l-4-4 4-4"/><path d="M21 11.8v2a4 4 0 0 1-4 4H3"/></svg></span>
+          <div><p id="live-trades-ct" class="text-sm font-bold text-gray-900 leading-none">—</p>
+          <p class="text-[10px] text-gray-400 mt-0.5">Trades Today</p></div>
+        </div>
+        <div class="pill px-3 py-2 flex items-center gap-2">
+          <span class="icon-chip bg-green-100 text-green-600"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1" fill="currentColor"/></svg></span>
+          <div><p id="hero-wr14" class="text-sm font-bold text-gray-900 leading-none">—</p>
+          <p class="text-[10px] text-gray-400 mt-0.5">14D Win Rate</p></div>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-2 mt-4 pt-4 border-t border-violet-100">
+        <span id="hero-status-dot" class="w-2 h-2 rounded-full bg-gray-300 shrink-0"></span>
+        <p id="hero-status-line" class="text-xs text-gray-500">Bot is stopped</p>
       </div>
     </div>
 
-    <div class="flex items-center gap-2 mt-4 pt-4 border-t border-violet-100">
-      <span id="hero-status-dot" class="w-2 h-2 rounded-full bg-gray-300 shrink-0"></span>
-      <p id="hero-status-line" class="text-xs text-gray-500">Bot is stopped</p>
-    </div>
   </div>
 
   <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -547,38 +606,6 @@ TEMPLATE = r"""
           </div>
         </div>
         <div id="perf14-chart" class="mt-3"></div>
-      </div>
-
-      <!-- ── Active Position ── -->
-      <div id="pos-card" class="card p-5 hidden">
-        <div class="flex items-center justify-between mb-4">
-          <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold">Open Position</p>
-          <div class="flex items-center gap-2">
-            <span id="pos-badge" class="text-xs font-bold px-2.5 py-0.5 rounded-full bg-blue-100 text-blue-700">CE</span>
-            <button onclick="manualExitPosition()"
-              class="text-xs font-bold px-3 py-1 rounded-full bg-red-100 text-red-700 hover:bg-red-200 transition">
-              ✕ Exit Trade
-            </button>
-          </div>
-        </div>
-        <div class="flex items-center justify-between flex-wrap gap-3 pb-4 border-b border-gray-100">
-          <div>
-            <p id="pos-sym" class="text-base font-bold text-gray-900"></p>
-            <p class="text-xs text-gray-400">Qty <span id="pos-qty" class="font-semibold text-gray-600"></span>
-              &middot; Entry <span id="pos-time" class="font-semibold text-gray-600"></span></p>
-          </div>
-          <div class="text-right">
-            <p id="pos-pnl" class="text-2xl font-extrabold"></p>
-            <p id="pos-pnl-pct" class="text-xs font-semibold"></p>
-          </div>
-        </div>
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm pt-3">
-          <div><p class="text-xs text-gray-400 mb-0.5">LTP</p><p id="pos-ltp" class="font-bold text-gray-900"></p></div>
-          <div><p class="text-xs text-gray-400 mb-0.5">Stop Loss</p><p id="pos-sl" class="font-bold text-red-600"></p></div>
-          <div><p class="text-xs text-gray-400 mb-0.5">Target</p><p id="pos-target" class="font-bold text-green-600"></p></div>
-          <div><p class="text-xs text-gray-400 mb-0.5">Invested</p><p id="pos-invested" class="font-bold text-gray-700"></p></div>
-        </div>
-        <div id="pos-tags" class="flex gap-2 mt-3"></div>
       </div>
 
       <!-- ── Trade Log ── -->
@@ -1074,8 +1101,10 @@ function refreshLive(){
 
     // Active position
     const posCard = document.getElementById('pos-card');
+    const posEmpty = document.getElementById('pos-empty');
     if(pos.active){
       posCard.classList.remove('hidden');
+      posEmpty.classList.add('hidden');
       document.getElementById('pos-sym').textContent = pos.symbol||'—';
       document.getElementById('pos-qty').textContent  = pos.qty||'—';
       document.getElementById('pos-ltp').textContent  = pos.live_ltp?'₹'+pos.live_ltp.toFixed(2):'—';
@@ -1102,6 +1131,7 @@ function refreshLive(){
       document.getElementById('pos-tags').innerHTML=tags;
     } else {
       posCard.classList.add('hidden');
+      posEmpty.classList.remove('hidden');
     }
 
     // Trade log
