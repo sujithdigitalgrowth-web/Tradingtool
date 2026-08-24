@@ -369,6 +369,10 @@ def api_trade_history():
         except Exception:
             pass
 
+    # Trades with P&L between ₹10 and ₹50 (either direction) are treated as
+    # test trades and dropped from history/stats entirely.
+    records = [r for r in records if r.get("pnl") is None or not (10 < abs(r["pnl"]) < 50)]
+
     records.sort(key=lambda r: (r.get("date",""), r.get("time","")))
 
     completed     = [r for r in records if r.get("pnl") is not None]
