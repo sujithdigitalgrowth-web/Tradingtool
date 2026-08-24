@@ -358,8 +358,9 @@ def api_trade_history():
             with open(TRADE_LOG_FILE) as f:
                 all_trades = json.load(f)
             for tr in all_trades:
-                if tr.get("is_test"):
-                    continue   # test trades never count toward history/stats
+                # reason check covers old records logged before is_test existed
+                if tr.get("is_test") or tr.get("reason") == "TEST_EXIT":
+                    continue
                 d = tr.get("date", "")
                 if d == today_str:
                     continue   # today is covered by Angel One above
