@@ -586,19 +586,42 @@ class AngelTrader:
     def _check_signal_supertrend(self, df_nbees):
         """
         Strategy 6: Supertrend(10,3) directional follower — single indicator,
-        no confirmation stack (no VIX/time-window/RSI/EMA/BNF/ADX/cooldown).
-        Flip Red(-1)->Green(1) => BUY_CE. Flip Green(1)->Red(-1) => BUY_PE.
-        Matches supertrend_45day_sl_backtest.py exactly.
+        no confirmation stack (no VIX/time-window/RSI/EMA/BNF/ADX), plus a
+        global loss cooldown (blocks BOTH directions, unlike V2's same-direction-
+        only cooldown) — added after the 2026-08-25 PE-stop-then-CE-whipsaw
+        incident, validated via supertrend_45day_trail_backtest.py
+        --cooldown-sweep --global. Flip Red(-1)->Green(1) => BUY_CE. Flip
+        Green(1)->Red(-1) => BUY_PE. Matches supertrend_45day_sl_backtest.py
+        exactly, plus the cooldown.
         """
         self._update_st_ref(df_nbees)
         value, prev = self._st_ref.get("value"), self._st_ref.get("prev")
         if value is None or prev is None:
             self.sig_info["filter_reason"] = "Warming up — not enough candles yet"
             return None
+
+        # Loss cooldown: decrement remaining-candle counters once per newly
+        # observed closed candle (not once per poll, which can be more frequent).
+        if self.loss_cooldown_candles > 0:
+            cur_candle_ts = self._st_ref.get("ts")
+            if cur_candle_ts != self._cooldown_last_ts:
+                for _d in ("buy", "sell"):
+                    if self._cooldown_remaining[_d] > 0:
+                        self._cooldown_remaining[_d] -= 1
+                self._cooldown_last_ts = cur_candle_ts
+        cooling = self.loss_cooldown_candles > 0 and (
+            self._cooldown_remaining["buy"] > 0 or self._cooldown_remaining["sell"] > 0)
+
         if value == 1 and prev == -1:
+            if cooling:
+                self.sig_info["filter_reason"] = f"Loss cooldown active ({max(self._cooldown_remaining.values())} candle(s) left)"
+                return None
             self.sig_info["filter_reason"] = None
             return "BUY_CE"
         if value == -1 and prev == 1:
+            if cooling:
+                self.sig_info["filter_reason"] = f"Loss cooldown active ({max(self._cooldown_remaining.values())} candle(s) left)"
+                return None
             self.sig_info["filter_reason"] = None
             return "BUY_PE"
         self.sig_info["filter_reason"] = f"Supertrend {'up' if value == 1 else 'down'} — no flip"
@@ -1074,8 +1097,15 @@ class AngelTrader:
             self.position  = _empty_pos()
             self.last_signal = None
             if not is_test and self.loss_cooldown_candles > 0 and total_trade_pnl < 0:
-                direction = "buy" if pos["side"] == "CE" else "sell"
-                self._cooldown_remaining[direction] = self.loss_cooldown_candles
+                if self.strategy == "supertrend":
+                    # Global cooldown: a loss blocks BOTH directions, since
+                    # V2's same-direction-only cooldown wouldn't have stopped
+                    # the 2026-08-25 PE-stop-then-CE-whipsaw pattern.
+                    self._cooldown_remaining["buy"]  = self.loss_cooldown_candles
+                    self._cooldown_remaining["sell"] = self.loss_cooldown_candles
+                else:
+                    direction = "buy" if pos["side"] == "CE" else "sell"
+                    self._cooldown_remaining[direction] = self.loss_cooldown_candles
 
         if not is_test and self.loss_cooldown_candles > 0 and total_trade_pnl < 0:
             logger.warning(f"Loss cooldown: blocking new {pos['side']} entries for "
@@ -1553,10 +1583,9 @@ class AngelTrader:
         self.max_daily_loss   = max_daily_loss if max_daily_loss is not None else bt.MAX_DAILY_LOSS
         self.daily_profit_target = (daily_profit_target if daily_profit_target is not None
                                     else bt.DAILY_PROFIT_TARGET)
-        # Loss cooldown was never part of what we backtested for the
-        # Supertrend strategy — keep it off there; restore V2's validated
-        # default when running (or switching back to) V2.
-        self.loss_cooldown_candles = (0 if self.strategy == "supertrend"
+        # Supertrend uses its own global (either-direction) cooldown constant;
+        # V2 uses its validated same-direction-only cooldown.
+        self.loss_cooldown_candles = (bt.ST6_LOSS_COOLDOWN_CANDLES if self.strategy == "supertrend"
                                       else bt.V2_LOSS_COOLDOWN_CANDLES)
         self.enabled          = True
         self._monitoring_only = False

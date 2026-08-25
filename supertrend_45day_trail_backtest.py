@@ -68,10 +68,13 @@ def _floor_for(peak_pct, lock_trigger, giveback):
 def run_backtest(df_5m, st_c, trading_days, dte_cache,
                   lock_trigger=bt.ST6_TRAIL_LOCK_TRIGGER,
                   giveback=bt.ST6_TRAIL_GIVEBACK,
-                  trail_enabled=True, qty=QTY):
+                  trail_enabled=True, qty=QTY,
+                  loss_cooldown_candles=0, global_cooldown=False,
+                  spot_sl_enabled=True):
     idx = df_5m.index
     position = None
     trades_by_date = {}
+    cooldown_until = {"CE": -1, "PE": -1}
 
     for i in range(1, len(idx)):
         ts = idx[i]
@@ -95,6 +98,12 @@ def run_backtest(df_5m, st_c, trading_days, dte_cache,
             gross = pnl_pu * position["qty"]
             net = gross - COST_PER_TRADE
             trades_by_date[position["entry_date"]].append({"pnl": net, "reason": reason})
+            if loss_cooldown_candles > 0 and net < 0:
+                if global_cooldown:
+                    cooldown_until["CE"] = i + loss_cooldown_candles
+                    cooldown_until["PE"] = i + loss_cooldown_candles
+                else:
+                    cooldown_until[position["type"]] = i + loss_cooldown_candles
             position = None
 
         if time_str >= bt.SQUAREOFF_TIME:
@@ -102,7 +111,7 @@ def run_backtest(df_5m, st_c, trading_days, dte_cache,
                 close_full("EOD_SQUAREOFF")
             continue
 
-        if position:
+        if position and spot_sl_enabled:
             adverse = (position["entry_spot"] - cl if position["type"] == "CE"
                        else cl - position["entry_spot"])
             if adverse >= SPOT_SL:
@@ -133,6 +142,8 @@ def run_backtest(df_5m, st_c, trading_days, dte_cache,
                 side = "CE"
             elif st_now == -1 and st_prev == 1:
                 side = "PE"
+            if side and loss_cooldown_candles > 0 and i <= cooldown_until[side]:
+                side = None
             if side:
                 entry_price = bt.estimate_option_price(cl, dte)
                 position = {"type": side, "entry_spot": cl, "entry_time": time_str,
@@ -205,6 +216,20 @@ if __name__ == "__main__":
             print(f"{lt:>12.0%} {gb:>10.0%} {net:>14,.0f}")
         best = max(grid, key=lambda x: x[2])
         print(f"\nBest combo: lock_trigger={best[0]:.0%} giveback={best[1]:.0%} -> Rs.{best[2]:+,.0f}")
+    elif "--no-spot-sl" in sys.argv:
+        with_sl    = run_backtest(df_5m, st_c, trading_days, dict(dte_cache), trail_enabled=True, spot_sl_enabled=True)
+        without_sl = run_backtest(df_5m, st_c, trading_days, dict(dte_cache), trail_enabled=True, spot_sl_enabled=False)
+        summarize(with_sl,    f"WITH SPOT_SL ({SPOT_SL}pt) -- current live behavior, qty={QTY}, {DAYS}d")
+        summarize(without_sl, f"NO SPOT_SL -- trail floor + ST_FLIP + EOD only, qty={QTY}, {DAYS}d")
+    elif "--cooldown-sweep" in sys.argv:
+        global_cd = "--global" in sys.argv
+        label = "ANY direction" if global_cd else "same direction"
+        print(f"Loss-cooldown sweep (candles after a losing exit before re-entry, {label})\n")
+        for cd in (0, 1, 2, 3, 4, 6, 12):
+            results = run_backtest(df_5m, st_c, trading_days, dict(dte_cache),
+                                   trail_enabled=True, loss_cooldown_candles=cd,
+                                   global_cooldown=global_cd)
+            summarize(results, f"COOLDOWN={cd} candle(s) ({cd*5}min, {label}) -- WITH TRAIL, qty={QTY}, {DAYS}d")
     else:
         baseline_results = run_backtest(df_5m, st_c, trading_days, dict(dte_cache), trail_enabled=False)
         trail_results = run_backtest(df_5m, st_c, trading_days, dict(dte_cache), trail_enabled=True)

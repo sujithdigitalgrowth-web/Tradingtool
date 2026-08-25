@@ -69,6 +69,15 @@ ST6_TRAIL_GIVEBACK     = 0.03  # once past ST6_TRAIL_LOCK_TRIGGER, exit if price
                                  # and consistently LOST money vs no partial --
                                  # letting the full qty run is what captures the
                                  # big trending days.
+ST6_LOSS_COOLDOWN_CANDLES = 3  # after ANY losing exit, block new entries in EITHER
+                                 # direction for this many closed candles (0 disables).
+                                 # Unlike V2_LOSS_COOLDOWN_CANDLES (same-direction only),
+                                 # this is global -- validated against the 2026-08-25
+                                 # PE-stop-then-CE-whipsaw incident via
+                                 # supertrend_45day_trail_backtest.py --cooldown-sweep
+                                 # --global: 3 candles costs ~Rs.13,200/45d vs no cooldown
+                                 # (Rs.27,691 vs Rs.40,935) but was chosen deliberately for
+                                 # the whipsaw protection over the higher-EV uncapped version.
 
 # ── V2 Strategy constants ─────────────────────────────────────────
 V2_TP_OPTION_PCT   = 0.20   # 2-lot: remaining lot hard TP at +20%
