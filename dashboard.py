@@ -1360,14 +1360,14 @@ function refreshBalance(){
 setInterval(refreshBalance,30000); refreshBalance();
 
 // 14-day win/loss performance (slow-moving — refresh every 60s)
-function renderSparkline(dayLabels, cumValues){
+function renderSparkline(dayLabels, cumValues, dayDeltas){
   if(!cumValues.length || cumValues.every(v=>v===0))
     return '<p class="text-xs text-gray-400 text-center py-10">No trades in this window yet.</p>';
-  const w=600, h=140, pad=6;
+  const w=600, h=180, pad=6, topPad=20;
   const min=Math.min(0,...cumValues), max=Math.max(0,...cumValues);
   const range=(max-min)||1;
   const x = i => pad + i*(w-2*pad)/Math.max(1,cumValues.length-1);
-  const y = v => h-pad - (v-min)/range*(h-2*pad);
+  const y = v => h-pad - (v-min)/(range)*(h-pad-topPad);
   const pts = cumValues.map((v,i)=>[x(i),y(v)]);
   const line = pts.map((p,i)=>(i===0?'M':'L')+p[0].toFixed(1)+','+p[1].toFixed(1)).join(' ');
   const area = line+` L${pts[pts.length-1][0].toFixed(1)},${(h-pad).toFixed(1)} L${pts[0][0].toFixed(1)},${(h-pad).toFixed(1)} Z`;
@@ -1375,10 +1375,24 @@ function renderSparkline(dayLabels, cumValues){
   const last  = pts[pts.length-1];
   const lastVal = cumValues[cumValues.length-1];
   const lastLabel = (lastVal>=0?'+':'-')+'₹'+Math.abs(lastVal).toLocaleString('en-IN',{maximumFractionDigits:0});
-  return `<svg viewBox="0 0 ${w} ${h}" class="w-full h-32" preserveAspectRatio="none">
+
+  // Per-day P&L labels above/below each point (skipped for zero-trade days)
+  const deltas = dayDeltas || [];
+  const labels = pts.map((p,i)=>{
+    const dv = deltas[i] || 0;
+    if(!dv) return '';
+    const txt   = (dv>=0?'+':'-')+Math.round(Math.abs(dv)).toLocaleString('en-IN');
+    const color = dv>=0 ? '#16a34a' : '#ef4444';
+    const above = p[1] > (topPad+10);
+    const ty    = above ? p[1]-8 : p[1]+14;
+    return `<text x="${p[0].toFixed(1)}" y="${ty.toFixed(1)}" font-size="9" font-weight="600" text-anchor="middle" fill="${color}">${txt}</text>`;
+  }).join('');
+
+  return `<svg viewBox="0 0 ${w} ${h}" class="w-full" preserveAspectRatio="none" style="height:9rem">
       <line x1="${pad}" y1="${zeroY}" x2="${w-pad}" y2="${zeroY}" stroke="#e9e4fb" stroke-width="1"/>
       <path d="${area}" fill="#7c3aed" fill-opacity="0.08" stroke="none"/>
       <path d="${line}" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+      ${labels}
       <circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="4.5" fill="#7c3aed" stroke="#fff" stroke-width="2"/>
     </svg>
     <div class="flex justify-between text-[10px] text-gray-400 mt-1 px-0.5">
@@ -1415,16 +1429,18 @@ function refreshPerf14(){
     // (including zero-trade days, so the line reflects real gaps).
     const byDate = {};
     (d.trades||[]).forEach(t=>{ if(t.pnl!=null) byDate[t.date]=(byDate[t.date]||0)+t.pnl; });
-    const dayLabels=[], cumValues=[];
+    const dayLabels=[], cumValues=[], dayDeltas=[];
     let running=0;
     for(let i=13;i>=0;i--){
       const dt = new Date(to.getTime()-i*24*60*60*1000);
       const key = dt.toISOString().slice(0,10);
-      running += byDate[key]||0;
+      const delta = byDate[key]||0;
+      running += delta;
       dayLabels.push(dt.toLocaleDateString('en-IN',{day:'2-digit',month:'short'}));
       cumValues.push(Math.round(running));
+      dayDeltas.push(Math.round(delta));
     }
-    document.getElementById('perf14-chart').innerHTML = renderSparkline(dayLabels, cumValues);
+    document.getElementById('perf14-chart').innerHTML = renderSparkline(dayLabels, cumValues, dayDeltas);
   }).catch(()=>{});
 }
 setInterval(refreshPerf14,60000); refreshPerf14();
