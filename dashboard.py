@@ -193,6 +193,22 @@ def api_exit_position():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/api/add-lot", methods=["POST"])
+def api_add_lot():
+    try:
+        ok, msg = get_trader().add_lot()
+        return jsonify({"status": "ok" if ok else "error", "message": msg}), (200 if ok else 400)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/sell-lot", methods=["POST"])
+def api_sell_lot():
+    try:
+        ok, msg = get_trader().sell_lot()
+        return jsonify({"status": "ok" if ok else "error", "message": msg}), (200 if ok else 400)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/api/test-trade", methods=["POST"])
 def api_test_trade():
     """Force a real CE buy then auto-exit after 5 seconds — for connectivity testing only."""
@@ -433,6 +449,11 @@ TEMPLATE = r"""
   /* Modal */
   #modal-bg{display:none;position:fixed;inset:0;background:rgba(30,27,46,.5);z-index:50;align-items:center;justify-content:center}
   #modal-bg.open{display:flex}
+  #day-modal-bg{display:none;position:fixed;inset:0;background:rgba(30,27,46,.5);z-index:50;align-items:center;justify-content:center}
+  #day-modal-bg.open{display:flex}
+  .cal-cell{cursor:default}
+  .cal-cell.has-trades{cursor:pointer}
+  .cal-cell.has-trades:hover{box-shadow:0 2px 8px rgba(0,0,0,.08)}
 </style>
 </head>
 <body class="min-h-screen">
@@ -487,6 +508,14 @@ TEMPLATE = r"""
           <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold">Open Position</p>
           <div class="flex items-center gap-2">
             <span id="pos-badge" class="text-xs font-bold px-2.5 py-0.5 rounded-full bg-blue-100 text-blue-700">CE</span>
+            <button id="btn-add-lot" onclick="addLot()"
+              class="text-xs font-bold px-3 py-1 rounded-full bg-green-100 text-green-700 hover:bg-green-200 transition">
+              + 1 Lot
+            </button>
+            <button id="btn-sell-lot" onclick="sellLot()"
+              class="text-xs font-bold px-3 py-1 rounded-full bg-amber-100 text-amber-700 hover:bg-amber-200 transition">
+              − 1 Lot
+            </button>
             <button onclick="manualExitPosition()"
               class="text-xs font-bold px-3 py-1 rounded-full bg-red-100 text-red-700 hover:bg-red-200 transition">
               ✕ Exit Trade
@@ -695,7 +724,7 @@ TEMPLATE = r"""
 <!-- ══════════════ TRADE HISTORY TAB ══════════════ -->
 <div id="pane-history" class="p-5 hidden space-y-4">
 
-  <!-- Controls -->
+  <!-- Date range -->
   <div class="card p-4">
     <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold mb-3">Trade History</p>
     <div class="flex flex-wrap items-end gap-4">
@@ -707,15 +736,15 @@ TEMPLATE = r"""
         <label class="text-xs text-gray-400 block mb-1">To</label>
         <input id="hist-to" type="date" class="bg-white border border-gray-300 rounded px-3 py-2 text-sm"/>
       </div>
-      <button onclick="loadHistory()"
+      <button onclick="loadHistoryRange()"
         class="bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-bold px-5 py-2 rounded transition">
         Load History
       </button>
     </div>
   </div>
 
-  <!-- Summary cards -->
-  <div id="hist-summary" class="hidden grid grid-cols-2 md:grid-cols-5 gap-4">
+  <!-- Summary cards (for the date range above) -->
+  <div id="hist-summary" class="hidden grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
     <div class="card p-4">
       <p class="text-xs text-gray-400 mb-1">Total Trades</p>
       <p id="hs-trades" class="text-2xl font-bold text-gray-900">—</p>
@@ -733,16 +762,38 @@ TEMPLATE = r"""
       <p id="hs-wl" class="text-2xl font-bold text-gray-900">—</p>
     </div>
     <div class="card p-4">
-      <p class="text-xs text-gray-400 mb-1">Capital Deployed</p>
-      <p id="hs-capital" class="text-2xl font-bold text-gray-700">—</p>
+      <p class="text-xs text-gray-400 mb-1">CE Win %</p>
+      <p id="hs-ce-wr" class="text-2xl font-bold text-blue-700">—</p>
+    </div>
+    <div class="card p-4">
+      <p class="text-xs text-gray-400 mb-1">PE Win %</p>
+      <p id="hs-pe-wr" class="text-2xl font-bold text-amber-700">—</p>
     </div>
   </div>
 
-  <!-- Table -->
-  <div class="card overflow-hidden">
-    <div id="hist-table-wrap">
-      <p class="text-sm text-gray-400 text-center py-8">Select a date range and click Load History.</p>
+  <!-- Month navigation -->
+  <div class="card p-4 flex items-center justify-between">
+    <button onclick="calShiftMonth(-1)"
+      class="w-9 h-9 rounded-full bg-gray-100 hover:bg-gray-200 text-gray-600 font-bold transition">‹</button>
+    <p id="cal-month-label" class="text-sm font-bold text-gray-900 uppercase tracking-widest">—</p>
+    <button onclick="calShiftMonth(1)"
+      class="w-9 h-9 rounded-full bg-gray-100 hover:bg-gray-200 text-gray-600 font-bold transition">›</button>
+  </div>
+
+  <!-- Calendar -->
+  <div class="card p-4">
+    <div class="grid grid-cols-7 gap-2 text-center text-xs font-bold text-gray-400 mb-2">
+      <div>MON</div><div>TUE</div><div>WED</div><div>THU</div><div>FRI</div><div>SAT</div><div>SUN</div>
     </div>
+    <div id="cal-grid" class="grid grid-cols-7 gap-2"></div>
+  </div>
+
+  <!-- Legend -->
+  <div class="flex items-center gap-5 text-xs text-gray-400 px-1">
+    <span class="flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-green-500 inline-block"></span>Profit Day</span>
+    <span class="flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-red-500 inline-block"></span>Loss Day</span>
+    <span class="flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-gray-300 inline-block"></span>No Trades</span>
+    <span class="ml-auto">All amounts in INR</span>
   </div>
 
 </div><!-- /pane-history -->
@@ -838,6 +889,19 @@ TEMPLATE = r"""
   </div>
 </div>
 
+<div id="day-modal-bg" class="modal-bg">
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-5xl mx-4 p-6 max-h-[85vh] overflow-y-auto">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <h2 id="day-modal-title" class="text-lg font-bold text-gray-900">—</h2>
+        <p id="day-modal-subtitle" class="text-xs text-gray-400 mt-0.5">—</p>
+      </div>
+      <button onclick="closeDayModal()"
+        class="w-8 h-8 rounded-full bg-gray-100 hover:bg-gray-200 text-gray-500 font-bold transition">✕</button>
+    </div>
+    <div id="day-modal-table" class="card overflow-hidden"></div>
+  </div>
+</div>
 
 <script>
 // ── Clock ──────────────────────────────────────────────────────
@@ -856,79 +920,134 @@ function switchTab(name){
     document.getElementById('tab-'+t).className=
       (t===name?'tab-a':'tab-i')+' px-5 py-2 text-sm font-semibold';
   });
+  if(name==='history') renderCalendar();
 }
 
-// ── Trade History ──────────────────────────────────────────────
-(function initHistDates(){
-  const today = new Date().toISOString().slice(0,10);
-  const month = new Date(new Date().setDate(1)).toISOString().slice(0,10);
-  document.getElementById('hist-from').value = month;
-  document.getElementById('hist-to').value   = today;
-})();
+// ── Trade History (calendar view) ────────────────────────────────
+let calDate = new Date(); calDate.setDate(1);
+let calTradesByDate = {};
 
-function loadHistory(){
-  const from = document.getElementById('hist-from').value;
-  const to   = document.getElementById('hist-to').value;
-  const wrap = document.getElementById('hist-table-wrap');
-  wrap.innerHTML = '<p class="text-sm text-gray-400 text-center py-8">Loading…</p>';
+function calFmt(d){ return d.toISOString().slice(0,10); }
+
+function calShiftMonth(delta){
+  calDate.setMonth(calDate.getMonth()+delta);
+  renderCalendar();
+}
+
+function renderCalendar(){
+  const year = calDate.getFullYear(), month = calDate.getMonth();
+  const monthNames = ['January','February','March','April','May','June','July',
+                       'August','September','October','November','December'];
+  document.getElementById('cal-month-label').textContent = monthNames[month]+' '+year;
+
+  const firstOfMonth = new Date(year, month, 1);
+  const lastOfMonth  = new Date(year, month+1, 0);
+  const startOffset  = (firstOfMonth.getDay()+6)%7;           // Mon=0 .. Sun=6
+  const endOffset    = (lastOfMonth.getDay()+6)%7;
+  const gridStart = new Date(firstOfMonth); gridStart.setDate(gridStart.getDate()-startOffset);
+  const gridEnd   = new Date(lastOfMonth);  gridEnd.setDate(gridEnd.getDate()+(6-endOffset));
+
+  const from = calFmt(gridStart), to = calFmt(gridEnd);
+  const grid = document.getElementById('cal-grid');
+  grid.innerHTML = '<p class="col-span-7 text-sm text-gray-400 text-center py-8">Loading…</p>';
+
+  // Keep the date-range boxes (and the stats they drive) in sync with the
+  // month currently shown, unless the user is mid-edit on a custom range.
+  const monthFirst = calFmt(firstOfMonth), monthLast = calFmt(lastOfMonth);
+  document.getElementById('hist-from').value = monthFirst;
+  document.getElementById('hist-to').value   = monthLast;
+  loadStatsForRange(monthFirst, monthLast);
+
   fetch(`/api/trade-history?from=${from}&to=${to}`)
     .then(r=>r.json())
     .then(d=>{
-      const s = d.summary || {};
-      document.getElementById('hist-summary').classList.remove('hidden');
-      const pnlEl = document.getElementById('hs-pnl');
-      pnlEl.textContent = (s.total_pnl>=0?'+':'')+inr(s.total_pnl||0);
-      pnlEl.className   = 'text-2xl font-bold '+cls(s.total_pnl||0);
-      document.getElementById('hs-trades') .textContent = s.total_trades||0;
-      document.getElementById('hs-wr')     .textContent = s.total_trades ? (s.win_rate||0)+'%' : '—';
-      document.getElementById('hs-wl')     .textContent = (s.wins||0)+' / '+(s.losses||0);
-      document.getElementById('hs-capital').textContent = s.total_capital ? inr(s.total_capital) : '—';
-      wrap.innerHTML = histTable(d.trades||[]);
+      const trades = d.trades||[];
+      calTradesByDate = {};
+      trades.forEach(t=>{ (calTradesByDate[t.date] = calTradesByDate[t.date]||[]).push(t); });
+
+      // Day cells
+      let html = '';
+      let cur = new Date(gridStart);
+      while(cur <= gridEnd){
+        const ds = calFmt(cur);
+        const inMonth   = cur.getMonth()===month;
+        const dayTrades = (calTradesByDate[ds]||[]).filter(t=>t.pnl!=null);
+        let inner = `<p class="text-xs font-semibold ${inMonth?'text-gray-700':'text-gray-300'} mb-1.5">${cur.getDate()}</p>`;
+        let cellTone = 'bg-white border-gray-100';
+
+        if(dayTrades.length){
+          const dayPnl = dayTrades.reduce((a,t)=>a+t.pnl,0);
+          const dayCap = dayTrades.reduce((a,t)=>a+(t.capital||0),0);
+          const dayPct = dayCap ? (dayPnl/dayCap*100) : 0;
+          cellTone = dayPnl>=0 ? 'bg-green-50 border-green-100' : 'bg-red-50 border-red-100';
+          const lines = dayTrades.map((t,i)=>
+            `<div class="flex justify-between text-xs"><span class="text-gray-400">Trade ${i+1}</span>`+
+            `<span class="${cls(t.pnl)} font-semibold">${t.pnl>=0?'+':''}${inr(t.pnl)}</span></div>`
+          ).join('');
+          inner += `<div class="space-y-0.5">${lines}</div>
+            <div class="border-t border-gray-200 mt-1.5 pt-1.5 space-y-0.5">
+              <div class="flex justify-between text-xs"><span class="text-gray-500 font-medium">Total P&amp;L</span>`+
+              `<span class="${cls(dayPnl)} font-bold">${dayPnl>=0?'+':''}${inr(dayPnl)}</span></div>
+              <div class="flex justify-between text-xs"><span class="text-gray-400">P&amp;L %</span>`+
+              `<span class="${cls(dayPnl)} font-semibold">${dayPnl>=0?'+':''}${dayPct.toFixed(1)}%</span></div>
+            </div>`;
+        }
+
+        const cellClass  = `cal-cell rounded-lg border p-2 min-h-[92px] ${cellTone}` + (dayTrades.length ? ' has-trades' : '');
+        const onclickAttr = dayTrades.length ? ` onclick="openDayModal('${ds}')"` : '';
+        html += `<div class="${cellClass}"${onclickAttr}>${inner}</div>`;
+        cur.setDate(cur.getDate()+1);
+      }
+      grid.innerHTML = html;
     })
-    .catch(()=>{ wrap.innerHTML='<p class="text-sm text-red-500 text-center py-8">Failed to load.</p>'; });
+    .catch(()=>{ grid.innerHTML = '<p class="col-span-7 text-sm text-red-500 text-center py-8">Failed to load.</p>'; });
 }
 
-function histTable(trades){
-  if(!trades||!trades.length)
-    return '<div class="px-4 py-8 text-center text-gray-400 text-sm">No trades found for this period.</div>';
-  const hdr=`<div class="overflow-x-auto"><table class="w-full text-sm">
-    <thead class="bg-gray-50 text-xs text-gray-500 uppercase">
-      <tr>
-        <th class="px-4 py-2 text-left">Date</th>
-        <th class="px-4 py-2 text-left">Symbol</th>
-        <th class="px-4 py-2 text-center">Side</th>
-        <th class="px-4 py-2 text-right">Entry</th>
-        <th class="px-4 py-2 text-right">Exit</th>
-        <th class="px-4 py-2 text-center">Lots</th>
-        <th class="px-4 py-2 text-right">Capital</th>
-        <th class="px-4 py-2 text-right">P&amp;L</th>
-        <th class="px-4 py-2 text-right">P&amp;L %</th>
-        <th class="px-4 py-2 text-center">Exit Reason</th>
-      </tr>
-    </thead><tbody>`;
-  const rows=[...trades].reverse().map(t=>{
-    const hasPnl  = t.pnl != null;
-    const pnlCls  = hasPnl ? cls(t.pnl) : 'text-gray-400';
-    const pnlTxt  = hasPnl ? (t.pnl>=0?'+':'')+inr(t.pnl) : '—';
-    const pctTxt  = hasPnl && t.pnl_pct!=null
-      ? (t.pnl_pct>=0?'+':'')+t.pnl_pct.toFixed(1)+'%' : '—';
-    const pctCls  = hasPnl ? cls(t.pnl) : 'text-gray-400';
-    const sideCls = t.side==='CE'?'bg-blue-100 text-blue-700':'bg-amber-100 text-amber-700';
-    const time    = t.time ? ` <span class="text-gray-400">${t.time}→${t.exit_time||''}</span>` : '';
-    return `<tr class="border-t border-gray-100 hover:bg-gray-50">
-      <td class="px-4 py-2 text-gray-700">${t.date||'—'}${time}</td>
-      <td class="px-4 py-2 font-mono text-xs text-gray-900">${t.symbol||'—'}</td>
-      <td class="px-4 py-2 text-center"><span class="text-xs font-bold px-2 py-0.5 rounded ${sideCls}">${t.side||'—'}</span></td>
-      <td class="px-4 py-2 text-right">${t.entry?'₹'+t.entry.toFixed(2):'—'}</td>
-      <td class="px-4 py-2 text-right">${t.exit?'₹'+t.exit.toFixed(2):'—'}</td>
-      <td class="px-4 py-2 text-center font-bold">${t.lots!=null?t.lots:'—'}</td>
-      <td class="px-4 py-2 text-right">${t.capital?inr(t.capital):'—'}</td>
-      <td class="px-4 py-2 text-right font-bold ${pnlCls}">${pnlTxt}</td>
-      <td class="px-4 py-2 text-right font-bold ${pctCls}">${pctTxt}</td>
-      <td class="px-4 py-2 text-center text-xs text-gray-500">${t.reason||'—'}</td>
-    </tr>`;
-  }).join('');
-  return hdr+rows+`</tbody></table></div>`;
+function loadHistoryRange(){
+  const from = document.getElementById('hist-from').value;
+  const to   = document.getElementById('hist-to').value;
+  if(!from || !to) return;
+  loadStatsForRange(from, to);
+}
+
+function loadStatsForRange(from, to){
+  fetch(`/api/trade-history?from=${from}&to=${to}`)
+    .then(r=>r.json())
+    .then(d=>{
+      const trades   = (d.trades||[]).filter(t=>t.pnl!=null);
+      const totalPnl = trades.reduce((a,t)=>a+t.pnl,0);
+      const wins     = trades.filter(t=>t.pnl>0).length;
+      const ceTrades = trades.filter(t=>t.side==='CE');
+      const peTrades = trades.filter(t=>t.side==='PE');
+      const ceWins   = ceTrades.filter(t=>t.pnl>0).length;
+      const peWins   = peTrades.filter(t=>t.pnl>0).length;
+
+      document.getElementById('hist-summary').classList.remove('hidden');
+      const pnlEl = document.getElementById('hs-pnl');
+      pnlEl.textContent = (totalPnl>=0?'+':'')+inr(totalPnl);
+      pnlEl.className   = 'text-2xl font-bold '+cls(totalPnl);
+      document.getElementById('hs-trades') .textContent = trades.length;
+      document.getElementById('hs-wr')     .textContent = trades.length ? Math.round(wins/trades.length*100)+'%' : '—';
+      document.getElementById('hs-wl')     .textContent = wins+' / '+(trades.length-wins);
+      document.getElementById('hs-ce-wr')  .textContent = ceTrades.length ? Math.round(ceWins/ceTrades.length*100)+'% ('+ceTrades.length+')' : '—';
+      document.getElementById('hs-pe-wr')  .textContent = peTrades.length ? Math.round(peWins/peTrades.length*100)+'% ('+peTrades.length+')' : '—';
+    })
+    .catch(()=>{});
+}
+
+function openDayModal(ds){
+  const trades = calTradesByDate[ds] || [];
+  const d = new Date(ds+'T00:00:00');
+  document.getElementById('day-modal-title').textContent =
+    d.toLocaleDateString('en-IN',{weekday:'long', day:'numeric', month:'long', year:'numeric'});
+  const dayPnl = trades.filter(t=>t.pnl!=null).reduce((a,t)=>a+t.pnl,0);
+  document.getElementById('day-modal-subtitle').textContent =
+    trades.length+' trade'+(trades.length!==1?'s':'')+' · Total P&L '+(dayPnl>=0?'+':'')+inr(dayPnl);
+  document.getElementById('day-modal-table').innerHTML = tradeTable(trades);
+  document.getElementById('day-modal-bg').classList.add('open');
+}
+function closeDayModal(){
+  document.getElementById('day-modal-bg').classList.remove('open');
 }
 
 // ── Format helpers ─────────────────────────────────────────────
@@ -1111,7 +1230,8 @@ function refreshLive(){
       posCard.classList.remove('hidden');
       posEmpty.classList.add('hidden');
       document.getElementById('pos-sym').textContent = pos.symbol||'—';
-      document.getElementById('pos-qty').textContent  = pos.qty||'—';
+      const _lotSz = (s.config && s.config.lot_size) || 65;
+      document.getElementById('pos-qty').textContent  = pos.qty ? pos.qty+' ('+Math.round(pos.qty/_lotSz)+' lot'+(pos.qty/_lotSz!==1?'s':'')+')' : '—';
       document.getElementById('pos-ltp').textContent  = pos.live_ltp?'₹'+pos.live_ltp.toFixed(2):'—';
       document.getElementById('pos-time').textContent = pos.entry_time||'—';
       const pp = pos.live_pnl||0;
@@ -1134,6 +1254,23 @@ function refreshLive(){
       if(pos.partial_done) tags+='<span class="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full">Partial exited</span>';
       if(pos.trail_on)     tags+='<span class="text-xs bg-violet-100 text-violet-700 px-2 py-0.5 rounded-full ml-1">Trail active</span>';
       document.getElementById('pos-tags').innerHTML=tags;
+
+      // +1 Lot / -1 Lot buttons
+      const lotSize   = (s.config && s.config.lot_size) || 65;
+      const maxAdds   = (s.config && s.config.max_manual_add_lots) || 2;
+      const addBtn    = document.getElementById('btn-add-lot');
+      const sellBtn   = document.getElementById('btn-sell-lot');
+      const addsUsed  = pos.manual_adds || 0;
+      const addMaxed  = addsUsed >= maxAdds;
+      addBtn.disabled = addMaxed;
+      addBtn.classList.toggle('opacity-40', addMaxed);
+      addBtn.classList.toggle('cursor-not-allowed', addMaxed);
+      addBtn.title = addMaxed ? 'Manual add limit reached ('+maxAdds+' max)' : '';
+      const onlyOneLot = (pos.qty||0) <= lotSize;
+      sellBtn.disabled = onlyOneLot;
+      sellBtn.classList.toggle('opacity-40', onlyOneLot);
+      sellBtn.classList.toggle('cursor-not-allowed', onlyOneLot);
+      sellBtn.title = onlyOneLot ? 'Only 1 lot left — use Exit Trade' : '';
     } else {
       posCard.classList.add('hidden');
       posEmpty.classList.remove('hidden');
@@ -1362,6 +1499,28 @@ function manualExitPosition(){
     .then(r=>r.json())
     .then(()=>setTimeout(refreshLive,500));
 }
+function addLot(){
+  if(!confirm('Buy 1 more lot at the current market price and add it to this position?')) return;
+  const btn=document.getElementById('btn-add-lot');
+  btn.disabled=true;
+  fetch('/api/add-lot',{method:'POST'})
+    .then(r=>r.json())
+    .then(d=>{
+      if(d.status==='error') alert('Error: '+d.message);
+      setTimeout(refreshLive,500);
+    }).catch(e=>alert('Error: '+e));
+}
+function sellLot(){
+  if(!confirm('Sell 1 lot from this position at the current market price?')) return;
+  const btn=document.getElementById('btn-sell-lot');
+  btn.disabled=true;
+  fetch('/api/sell-lot',{method:'POST'})
+    .then(r=>r.json())
+    .then(d=>{
+      if(d.status==='error') alert('Error: '+d.message);
+      setTimeout(refreshLive,500);
+    }).catch(e=>alert('Error: '+e));
+}
 function testTrade(){
   if(!confirm('Place a REAL CE order on Angel One and auto-exit in 5 seconds?\n\nThis is for connectivity testing only — a real order will be placed.')) return;
   const btn=document.getElementById('btn-test');
@@ -1380,6 +1539,9 @@ function testTrade(){
 // Close modal on background click
 document.getElementById('modal-bg').addEventListener('click',function(e){
   if(e.target===this) closeModal();
+});
+document.getElementById('day-modal-bg').addEventListener('click',function(e){
+  if(e.target===this) closeDayModal();
 });
 
 </script>

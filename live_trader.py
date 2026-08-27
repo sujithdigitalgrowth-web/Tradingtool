@@ -112,9 +112,13 @@ def _mark_test_order(order_id):
         logger.warning(f"test_order_id log error: {e}")
 
 # ── Timing ────────────────────────────────────────────────────────
-SQUAREOFF_TIME  = "15:15"
-MARKET_OPEN     = "09:15"
-MARKET_CLOSE    = "15:30"
+SQUAREOFF_TIME    = "15:15"
+NO_NEW_TRADE_TIME = "14:30"
+MARKET_OPEN       = "09:15"
+MARKET_CLOSE      = "15:30"
+
+# ── Manual position sizing (dashboard "+1 Lot" / "-1 Lot" buttons) ─
+MAX_MANUAL_ADD_LOTS = 2   # cap on extra lots addable to one open position
 
 # ── WebSocket real-time feed ──────────────────────────────────────
 _WS_V2_URL       = "wss://smartapisocket.angelone.in/smart-stream"
@@ -633,6 +637,11 @@ class AngelTrader:
         Returns ("BUY_CE" | "BUY_PE" | None, vix_value | None)
         Also updates self.sig_info["filter_reason"] with why no signal fired.
         """
+        # Global cutoff — no new trades after NO_NEW_TRADE_TIME, either strategy.
+        if _now().strftime("%H:%M") >= NO_NEW_TRADE_TIME:
+            self.sig_info["filter_reason"] = f"No new trades after {NO_NEW_TRADE_TIME}"
+            return None, None
+
         if self.strategy == "supertrend":
             return self._check_signal_supertrend(df_nbees), None
 
@@ -986,6 +995,7 @@ class AngelTrader:
                 "live_ltp"     : entry_ltp,
                 "live_pnl"     : 0.0,
                 "order_id"     : order_id,
+                "manual_adds"  : 0,
                 "paper"        : self.paper_mode,
                 "is_test"      : is_test,
                 "realized_pnl" : 0.0,
@@ -1178,6 +1188,196 @@ class AngelTrader:
             f"Remaining: {pos['qty'] - qty} qty — running to +20% TARGET\n"
             f"Time   : {_now().strftime('%H:%M')}")
         self._save_state()
+
+    def add_lot(self):
+        """
+        Manually add 1 lot to the active position at the current option LTP
+        (dashboard "+1 Lot" button). Recomputes entry_price as the qty-weighted
+        average of the old position and the new fill, so downstream SL/target/
+        trailing logic (which all key off a single scalar entry_price) keeps
+        working unchanged. Capped at MAX_MANUAL_ADD_LOTS manual adds per trade.
+        Returns (ok: bool, message: str).
+        """
+        with self._lock:
+            if not self.position["active"]:
+                return False, "No active position"
+            if self.position.get("exiting"):
+                return False, "Position busy — try again in a moment"
+            self.position["exiting"] = True   # claim: block concurrent auto-exit while we add
+            pos = dict(self.position)
+
+        try:
+            if _now().strftime("%H:%M") >= NO_NEW_TRADE_TIME:
+                return False, f"No new exposure after {NO_NEW_TRADE_TIME}"
+
+            manual_adds = pos.get("manual_adds", 0)
+            if manual_adds >= MAX_MANUAL_ADD_LOTS:
+                return False, f"Manual add limit reached (+{MAX_MANUAL_ADD_LOTS} lots max)"
+
+            add_qty = bt.LOT_SIZE
+            ltp = self.get_option_ltp(pos["symbol"], pos["token"])
+            if not ltp:
+                return False, "Could not fetch option LTP"
+
+            if not self.paper_mode and self.balance > 0 and (ltp * add_qty) > self.balance:
+                return False, f"Insufficient balance: need ₹{ltp*add_qty:,.0f}, available ₹{self.balance:,.0f}"
+
+            fill = ltp
+            if not self.paper_mode:
+                resp = self._order(pos["symbol"], pos["token"], add_qty, "BUY")
+                if not (resp and resp.get("status")):
+                    msg = resp.get("message", "") if isinstance(resp, dict) else str(resp)
+                    logger.error(f"Manual add-lot buy failed: {resp}")
+                    return False, f"Buy order failed: {msg}"
+                order_id = resp.get("data", {}).get("orderid", "—")
+                try:
+                    import time as _time; _time.sleep(1)
+                    tb = self._obj.tradeBook()
+                    if tb and tb.get("status") and tb.get("data") and order_id != "—":
+                        for row in tb["data"]:
+                            if str(row.get("orderid")) == str(order_id):
+                                f = float(row.get("fillprice") or 0)
+                                if f:
+                                    fill = f
+                                break
+                except Exception as e:
+                    logger.warning(f"Could not fetch add-lot fill price: {e}")
+
+            with self._lock:
+                if not self.position["active"]:
+                    _tg(f"⚠️ <b>MANUAL ADD-LOT MISMATCH</b>\n"
+                        f"Bought +{add_qty} qty of {pos['symbol']} @ ₹{fill:.2f} but the "
+                        f"position closed while the order was in flight — the bot is no "
+                        f"longer tracking this lot. Please reconcile on the Angel One app.\n"
+                        f"Time: {_now().strftime('%H:%M:%S')}")
+                    return False, "Position closed while order was in flight — check Angel One app"
+
+                old_qty   = self.position["qty"]
+                old_entry = self.position["entry_price"]
+                new_qty   = old_qty + add_qty
+                new_entry = round((old_qty * old_entry + add_qty * fill) / new_qty, 2)
+                self.position["qty"]         = new_qty
+                self.position["initial_qty"] = max(self.position.get("initial_qty", old_qty), new_qty)
+                self.position["entry_price"] = new_entry
+                self.position["trail_high"]  = max(self.position.get("trail_high", fill), fill)
+                self.position["manual_adds"] = manual_adds + 1
+                self.position["live_ltp"]    = round(fill, 2)
+                self.position["live_pnl"]    = round((fill - new_entry) * new_qty, 2)
+
+            lots = new_qty // bt.LOT_SIZE
+            tag  = "[PAPER] " if self.paper_mode else ""
+            logger.info(f"{tag}Manual add-lot: +{add_qty} @ {fill}, new avg entry {new_entry}, qty {new_qty}")
+            self._log_activity("entry", f"{tag}Manual +1 lot — {pos['symbol']} @ ₹{fill:.2f} "
+                                        f"(now {lots} lots, avg ₹{new_entry:.2f})")
+            _tg(f"➕ <b>{tag}MANUAL ADD 1 LOT</b>\n"
+                f"Symbol : {pos['symbol']}\n"
+                f"Fill   : ₹{fill:.2f}\n"
+                f"New Qty: {new_qty} ({lots} lots)\n"
+                f"New Avg: ₹{new_entry:.2f}\n"
+                f"Time   : {_now().strftime('%H:%M:%S')}")
+            self._save_state()
+            return True, "Lot added"
+        finally:
+            with self._lock:
+                if self.position["active"]:
+                    self.position["exiting"] = False
+
+    def sell_lot(self):
+        """
+        Manually sell 1 lot from the active position at the current option LTP
+        (dashboard "-1 Lot" button). Books realized P&L on the sold lot like
+        the automatic partial-exit does; entry_price on the remaining qty is
+        left unchanged (it's already a blended average). Refuses to sell the
+        last lot — use "Exit Trade" to close the position fully.
+        Returns (ok: bool, message: str).
+        """
+        with self._lock:
+            if not self.position["active"]:
+                return False, "No active position"
+            if self.position.get("exiting"):
+                return False, "Position busy — try again in a moment"
+            if self.position["qty"] <= bt.LOT_SIZE:
+                return False, "Only 1 lot left — use Exit Trade to close fully"
+            self.position["exiting"] = True   # claim: block concurrent auto-exit while we sell
+            pos = dict(self.position)
+
+        try:
+            reduce_qty = bt.LOT_SIZE
+            ltp = self.get_option_ltp(pos["symbol"], pos["token"])
+            if not ltp:
+                return False, "Could not fetch option LTP"
+
+            fill = ltp
+            if not self.paper_mode:
+                resp = self._order(pos["symbol"], pos["token"], reduce_qty, "SELL")
+                if not (resp and resp.get("status")):
+                    msg = resp.get("message", "") if isinstance(resp, dict) else str(resp)
+                    logger.error(f"Manual sell-lot failed: {resp}")
+                    return False, f"Sell order failed: {msg}"
+                sell_order_id = resp.get("data", {}).get("orderid")
+                try:
+                    import time as _time; _time.sleep(1)
+                    tb = self._obj.tradeBook()
+                    if tb and tb.get("status") and tb.get("data") and sell_order_id:
+                        for row in tb["data"]:
+                            if str(row.get("orderid")) == str(sell_order_id):
+                                f = float(row.get("fillprice") or 0)
+                                if f:
+                                    fill = f
+                                break
+                except Exception as e:
+                    logger.warning(f"Could not fetch sell-lot fill price: {e}")
+
+            pnl     = round((fill - pos["entry_price"]) * reduce_qty, 2)
+            pnl_pct = round((fill - pos["entry_price"]) / pos["entry_price"] * 100, 2) if pos["entry_price"] else 0
+            capital = round(pos["entry_price"] * reduce_qty, 2)
+            record = {
+                "date"      : _today().isoformat(),
+                "time"      : pos["entry_time"],
+                "exit_time" : _now().strftime("%H:%M"),
+                "symbol"    : pos["symbol"],
+                "side"      : pos["side"],
+                "strike"    : pos["strike"],
+                "entry"     : pos["entry_price"],
+                "exit"      : round(fill, 2),
+                "entry_spot": pos["entry_spot"],
+                "qty"       : reduce_qty,
+                "lots"      : 1,
+                "capital"   : capital,
+                "pnl"       : pnl,
+                "pnl_pct"   : pnl_pct,
+                "reason"    : "MANUAL_SELL_LOT",
+                "paper"     : self.paper_mode,
+            }
+
+            with self._lock:
+                remaining = pos["qty"] - reduce_qty
+                if self.position["active"]:
+                    self.trades.append(record)
+                    self.daily_pnl += pnl
+                    self.position["qty"] = remaining
+                    self.position["realized_pnl"] = self.position.get("realized_pnl", 0.0) + pnl
+                    self.position["live_ltp"] = round(fill, 2)
+                    self.position["live_pnl"] = round((fill - pos["entry_price"]) * remaining, 2)
+
+            _append_trade_log(record)
+
+            tag = "[PAPER] " if self.paper_mode else ""
+            logger.info(f"{tag}Manual sell-lot: -{reduce_qty} @ {fill} pnl={pnl}")
+            self._log_activity("exit" if pnl >= 0 else "exit_loss",
+                               f"{tag}Manual -1 lot — {pos['symbol']} @ ₹{fill:.2f} "
+                               f"({'+' if pnl>=0 else ''}₹{pnl:,.2f})")
+            _tg(f"➖ <b>{tag}MANUAL SELL 1 LOT</b>\n"
+                f"Symbol : {pos['symbol']}\n"
+                f"Fill   : ₹{fill:.2f}  P&L: {'+' if pnl>=0 else ''}₹{pnl:,.2f}\n"
+                f"Remaining: {remaining} qty ({remaining // bt.LOT_SIZE} lot(s))\n"
+                f"Time   : {_now().strftime('%H:%M:%S')}")
+            self._save_state()
+            return True, "Lot sold"
+        finally:
+            with self._lock:
+                if self.position["active"]:
+                    self.position["exiting"] = False
 
     # ── Real-time tick feed management ───────────────────────────
 
@@ -1673,7 +1873,8 @@ class AngelTrader:
             "monitoring"  : self._monitoring_only,
             "paper_mode"  : self.paper_mode,
             "config"      : {"max_trades": self.max_trades, "lots": self.lots, "paper": self.paper_mode,
-                             "strategy": self.strategy},
+                             "strategy": self.strategy, "lot_size": bt.LOT_SIZE,
+                             "max_manual_add_lots": MAX_MANUAL_ADD_LOTS},
             "market"      : {"nifty_ltp": self.nifty_ltp, "vix": self.sig_info.get("vix"),
                              "st_trend": self._st_ref.get("value")},
             "signal"      : self.sig_info,
@@ -1734,6 +1935,7 @@ def _empty_pos():
         "trail_on"     : False, "trail_high"  : 0.0,
         "live_ltp"     : 0.0,   "live_pnl"   : 0.0,
         "order_id"          : None,
+        "manual_adds"       : 0,   # count of manual "+1 Lot" clicks this trade
         "sl_warn_count"     : 0,   # consecutive polls in premium backstop zone
         "spot_sl_warn_count": 0,   # consecutive polls with spot beyond SL threshold
         "realized_pnl"      : 0.0,  # running pnl for this trade cycle (partial + final)
