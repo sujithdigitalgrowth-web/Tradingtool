@@ -3,7 +3,7 @@ live_trader.py — Angel One Smart API live trading engine
 Strategy : V2 (VWAP + EMA9/20 + RSI + Volume + BNF + Supertrend + VIX)
 Lot size  : 65 (NSE, effective Oct 28 2025)
 """
-import os, json, time, threading, requests, struct, ssl
+import os, json, time, threading, requests, struct, ssl, re
 from collections import deque
 import websocket
 import pandas as pd, numpy as np
@@ -72,6 +72,70 @@ SCRIP_CACHE       = "logs/scrip_nfo.json"
 LIVE_STATE_FILE   = "logs/live_state.json"
 TRADE_LOG_FILE    = "logs/trade_history.json"
 TEST_ORDER_ID_FILE = "logs/test_order_ids.json"
+
+# ── India VIX — shown beside NIFTY 50 in the dashboard header ──────
+# (exchange, Angel One symbol token, display name, subtitle)
+INDEX_QUOTES = [
+    ("NSE", "99926017", "INDIA VIX", "Volatility index · lower = calmer"),
+]
+
+# ── Sector index cards on the dashboard's "Index" tab ──────────────
+# (display name, exchange, index token, subtitle, [(stock symbol, NSE-EQ token), ...])
+#
+# The 5 constituent stocks per sector are a manually curated snapshot of
+# well-known large caps — Angel's API has no live index-weights endpoint,
+# so this isn't pulled from an official "top 5 by weight" feed. Revisit
+# periodically; NSE rebalances sector indices a few times a year.
+SECTOR_INDICES = [
+    ("NIFTY 50", "NSE", "99926000", "50 large-cap stocks", [
+        ("HDFCBANK", "1333"), ("RELIANCE", "2885"), ("ICICIBANK", "4963"),
+        ("INFY", "1594"), ("TCS", "11536"),
+    ]),
+    ("NIFTY BANK", "NSE", "99926009", "Banking sector", [
+        ("HDFCBANK", "1333"), ("ICICIBANK", "4963"), ("KOTAKBANK", "1922"),
+        ("AXISBANK", "5900"), ("SBIN", "3045"),
+    ]),
+    ("NIFTY PSU BANK", "NSE", "99926025", "PSU banks", [
+        ("SBIN", "3045"), ("BANKBARODA", "4668"), ("PNB", "10666"),
+        ("CANBK", "10794"), ("UNIONBANK", "10753"),
+    ]),
+    ("NIFTY PVT BANK", "NSE", "99926047", "Private banks", [
+        ("HDFCBANK", "1333"), ("ICICIBANK", "4963"), ("KOTAKBANK", "1922"),
+        ("AXISBANK", "5900"), ("INDUSINDBK", "5258"),
+    ]),
+    ("NIFTY FMCG", "NSE", "99926021", "FMCG sector", [
+        ("ITC", "1660"), ("HINDUNILVR", "1394"), ("NESTLEIND", "17963"),
+        ("VBL", "18921"), ("BRITANNIA", "547"),
+    ]),
+    ("NIFTY IT", "NSE", "99926008", "Technology sector", [
+        ("TCS", "11536"), ("INFY", "1594"), ("HCLTECH", "7229"),
+        ("WIPRO", "3787"), ("TECHM", "13538"),
+    ]),
+    ("NIFTY MEDIA", "NSE", "99926031", "Media & entertainment", [
+        ("ZEEL", "3812"), ("SUNTV", "13404"), ("PVRINOX", "13147"),
+        ("SAREGAMA", "4892"), ("NETWORK18", "14111"),
+    ]),
+    ("NIFTY ENERGY", "NSE", "99926020", "Energy sector", [
+        ("RELIANCE", "2885"), ("ONGC", "2475"), ("NTPC", "11630"),
+        ("POWERGRID", "14977"), ("COALINDIA", "20374"),
+    ]),
+    ("NIFTY METAL", "NSE", "99926030", "Metal & mining", [
+        ("TATASTEEL", "3499"), ("JSWSTEEL", "11723"), ("HINDALCO", "1363"),
+        ("VEDL", "3063"), ("JINDALSTEL", "6733"),
+    ]),
+    ("NIFTY PHARMA", "NSE", "99926023", "Pharma sector", [
+        ("SUNPHARMA", "3351"), ("CIPLA", "694"), ("DRREDDY", "881"),
+        ("DIVISLAB", "10940"), ("LUPIN", "10440"),
+    ]),
+    ("BSE HEALTHCARE", "BSE", "99919009", "Healthcare (BSE index)", [
+        ("SUNPHARMA", "3351"), ("APOLLOHOSP", "157"), ("CIPLA", "694"),
+        ("DIVISLAB", "10940"), ("DRREDDY", "881"),
+    ]),
+    ("BSE CONSUMER DURABLES", "BSE", "99919008", "Consumer durables (BSE index)", [
+        ("TITAN", "3506"), ("VOLTAS", "3718"), ("HAVELLS", "9819"),
+        ("CROMPTON", "17094"), ("DIXON", "21690"),
+    ]),
+]
 
 
 def _append_trade_log(record: dict):
@@ -153,19 +217,25 @@ class _TickFeed:
         self._code    = client_code
         self._feed    = feed_token
         self._on_tick = on_tick
-        self._tokens  = []
+        self._groups  = {}   # exchangeType -> [token, ...]
         self._ws_app  = None
         self._active  = False
 
     def subscribe(self, nfo_tokens: list):
-        self._tokens = [str(t) for t in nfo_tokens]
+        self._groups = {2: [str(t) for t in nfo_tokens]}   # 2 = NFO
+
+    def subscribe_groups(self, groups: dict):
+        """groups: {exchangeType: [token, ...]} — lets one feed span multiple
+        exchanges (e.g. 1=NSE indices + 3=BSE indices) in a single connection."""
+        self._groups = {ex: [str(t) for t in toks] for ex, toks in groups.items()}
 
     def _sub_msg(self):
         return json.dumps({
             "action": 1,
             "params": {
                 "mode": 1,
-                "tokenList": [{"exchangeType": 2, "tokens": self._tokens}],
+                "tokenList": [{"exchangeType": ex, "tokens": toks}
+                              for ex, toks in self._groups.items()],
             },
         })
 
@@ -181,7 +251,7 @@ class _TickFeed:
 
         def _on_open(ws):
             ws.send(self._sub_msg())
-            logger.info(f"TickFeed: subscribed NFO tokens {self._tokens}")
+            logger.info(f"TickFeed: subscribed {self._groups}")
 
         def _on_message(ws, message):
             if isinstance(message, (bytes, bytearray)):
@@ -330,6 +400,22 @@ class AngelTrader:
         self._ws_feed   = None
         self._ws_thread = None
 
+        # Index quotes (dashboard "Index" tab) — independent of trade state,
+        # runs for the app's lifetime once logged in. WS pushes live LTP;
+        # a slow REST poll keeps "close" (and LTP as a fallback) fresh.
+        self._idx_cache      = {}     # token -> {"ltp":, "close":, "ts": monotonic}
+        self._idx_ws_feed    = None
+        self._idx_ws_thread  = None
+        self._idx_rest_thread = None
+        self._idx_started    = False
+        self._idx_epoch      = 0      # bumped on relogin so old feed loops exit
+        self._stock_hist      = {}    # token -> {"c7":, "c30":, "c90":} reference closes
+        self._stock_hist_date = None
+
+        # Live NIFTY Put-Call Ratio for the header — current snapshot only,
+        # Angel's API has no historical PCR (see options_confirmation.py).
+        self._pcr_cache = {"value": None, "ts": None}
+
         # Underlying EMA9 reference — kept fresh even while a position is
         # open, so _manage_position can check EMA_EXIT (backtest.py's
         # dominant exit mechanism, ported here to match validated results).
@@ -417,6 +503,16 @@ class AngelTrader:
         self.connected  = True
         self.last_error = None
         _setup_logfile()
+
+        # Re-login (initial or 6.5h refresh) invalidates any running index
+        # feed's auth token — bump the epoch so old feed/REST loops exit
+        # instead of piling up, then rebuild fresh.
+        self._idx_epoch += 1
+        if self._idx_ws_feed:
+            self._idx_ws_feed.stop()
+            self._idx_ws_feed = None
+        self._idx_started = False
+        self._start_index_feed()
         logger.info("AngelTrader: login OK")
 
     def _ensure_session(self):
@@ -471,6 +567,227 @@ class AngelTrader:
         except Exception as e:
             logger.warning(f"get_nifty_ltp: {e}")
         return self.nifty_ltp
+
+    # ── Index quotes (dashboard "Index" tab + header VIX) ───────────
+    # Runs independently of trade state: one shared WebSocket stream for
+    # live LTP ticks, a slow REST poll as the source of "close" (and a
+    # fallback when the market's shut or the socket drops), and a once-
+    # daily historical pass for each constituent stock's 7d/30d/90d change.
+
+    @staticmethod
+    def _all_quote_tokens():
+        """{exchange: [token, ...]} for every index + constituent stock we track."""
+        groups = {}
+        for exch, token, _name, _subtitle in INDEX_QUOTES:
+            groups.setdefault(exch, set()).add(token)
+        for _name, exch, token, _subtitle, stocks in SECTOR_INDICES:
+            groups.setdefault(exch, set()).add(token)
+            for _sym, stock_token in stocks:
+                groups.setdefault("NSE", set()).add(stock_token)
+        return {exch: sorted(toks) for exch, toks in groups.items()}
+
+    def _fetch_indices_rest(self):
+        """Batched quote calls (chunked to stay under Angel's per-request cap)
+        — refreshes ltp+close for every index and constituent-stock token."""
+        now = time.monotonic()
+        for exch, tokens in self._all_quote_tokens().items():
+            for i in range(0, len(tokens), 40):
+                chunk = tokens[i:i + 40]
+                resp = self._obj.getMarketData("FULL", {exch: chunk})
+                if not (resp and resp.get("status") and resp.get("data")):
+                    continue
+                for row in resp["data"].get("fetched", []):
+                    token = str(row.get("symbolToken"))
+                    try:
+                        ltp   = float(row.get("ltp"))
+                        close = float(row.get("close"))
+                    except (TypeError, ValueError):
+                        continue
+                    entry = self._idx_cache.setdefault(token, {})
+                    entry["close"] = close
+                    entry["ltp"]   = ltp
+                    entry["ts"]    = now
+
+    @staticmethod
+    def _closest_close(closes, target_date):
+        """Last daily close at or before target_date, from a Close Series
+        indexed by tz-aware timestamp (as returned by angel_data._fetch_daily)."""
+        mask = closes.index.date <= target_date
+        if not mask.any():
+            return None
+        return float(closes[mask].iloc[-1])
+
+    def _fetch_stock_history(self):
+        """Refresh 7d/30d/90d reference closes for every constituent stock.
+        Daily candles don't change intraday, so this only re-fetches once/day."""
+        today = _today()
+        if self._stock_hist_date == today:
+            return
+        from angel_data import _fetch_daily
+        api_key = os.getenv("ANGEL_API_KEY", "")
+        seen, hist = set(), {}
+        for _name, _exch, _idx_token, _subtitle, stocks in SECTOR_INDICES:
+            for sym, token in stocks:
+                if token in seen:
+                    continue
+                seen.add(token)
+                try:
+                    df = _fetch_daily(self._auth, api_key, token,
+                                      today - timedelta(days=120), today)
+                    if not df.empty:
+                        closes = df["Close"]
+                        hist[token] = {
+                            "c7":  self._closest_close(closes, today - timedelta(days=7)),
+                            "c30": self._closest_close(closes, today - timedelta(days=30)),
+                            "c90": self._closest_close(closes, today - timedelta(days=90)),
+                        }
+                except Exception as e:
+                    logger.warning(f"stock history {sym}: {e}")
+                time.sleep(0.35)   # stay well under Angel's historical-API rate limit
+        self._stock_hist      = hist
+        self._stock_hist_date = today
+        logger.info(f"Stock history refreshed: {len(hist)} symbols")
+
+    def _start_index_feed(self):
+        if self._idx_started or not (self._auth and self._feed_token):
+            return
+        self._idx_started = True
+        my_epoch = self._idx_epoch
+
+        def _rest_loop():
+            while self._idx_epoch == my_epoch:
+                try:
+                    self._fetch_indices_rest()
+                except Exception as e:
+                    logger.warning(f"index REST refresh: {e}")
+                time.sleep(20)
+
+        def _hist_loop():
+            while self._idx_epoch == my_epoch:
+                try:
+                    self._fetch_stock_history()
+                except Exception as e:
+                    logger.warning(f"stock history refresh: {e}")
+                time.sleep(3600)   # cheap re-check; the fetch itself no-ops same-day
+
+        def _on_idx_tick(token, ltp):
+            entry = self._idx_cache.setdefault(token, {})
+            entry["ltp"] = ltp
+            entry["ts"]  = time.monotonic()
+
+        def _ws_loop():
+            client_code = os.getenv("ANGEL_CLIENT_ID", "")
+            groups = {}
+            for exch, tokens in self._all_quote_tokens().items():
+                groups[1 if exch == "NSE" else 3] = tokens
+            while self._idx_epoch == my_epoch:
+                try:
+                    feed = _TickFeed(self._auth, client_code, self._feed_token, _on_idx_tick)
+                    feed.subscribe_groups(groups)
+                    self._idx_ws_feed = feed
+                    feed.connect()   # blocks until dropped
+                except Exception as e:
+                    logger.warning(f"index TickFeed disconnected: {e}")
+                if self._idx_epoch == my_epoch:
+                    time.sleep(3)
+
+        try:
+            self._fetch_indices_rest()   # seed the cache before the first request lands
+        except Exception as e:
+            logger.warning(f"index REST seed: {e}")
+
+        self._idx_rest_thread = threading.Thread(target=_rest_loop, daemon=True, name="IndexRest")
+        self._idx_rest_thread.start()
+        self._idx_ws_thread = threading.Thread(target=_ws_loop, daemon=True, name="IndexTickFeed")
+        self._idx_ws_thread.start()
+        threading.Thread(target=_hist_loop, daemon=True, name="StockHistory").start()
+
+    def get_indices(self):
+        try:
+            self._ensure_session()
+            self._start_index_feed()
+            out = []
+            now = time.monotonic()
+            for exch, token, name, subtitle in INDEX_QUOTES:
+                entry = self._idx_cache.get(token, {})
+                ltp, close, ts = entry.get("ltp"), entry.get("close"), entry.get("ts")
+                change = pct = None
+                if ltp is not None and close:
+                    change = round(ltp - close, 2)
+                    pct    = round(change / close * 100, 2)
+                out.append({
+                    "name": name, "subtitle": subtitle, "exchange": exch,
+                    "ltp": round(ltp, 2) if ltp is not None else None,
+                    "change": change, "pct_change": pct,
+                    "live": bool(ts and (now - ts) < 25),   # > the 20s REST refresh cadence
+                })
+            return out
+        except Exception as e:
+            logger.warning(f"get_indices: {e}")
+            return []
+
+    def get_nifty_pcr(self):
+        """Live NIFTY Put-Call Ratio for the header — cached 60s (putCallRatio()
+        returns the full market's PCR list, so it isn't polled every request)."""
+        now = time.monotonic()
+        if self._pcr_cache["ts"] is not None and (now - self._pcr_cache["ts"]) < 60:
+            return self._pcr_cache["value"]
+        try:
+            self._ensure_session()
+            resp = self._obj.putCallRatio()
+            if resp and resp.get("status"):
+                for row in resp.get("data", []):
+                    if re.match(r"^NIFTY\d", row.get("tradingSymbol", "")):
+                        self._pcr_cache = {"value": round(float(row["pcr"]), 3), "ts": now}
+                        return self._pcr_cache["value"]
+        except Exception as e:
+            logger.warning(f"get_nifty_pcr: {e}")
+        return self._pcr_cache["value"]
+
+    def get_sector_indices(self):
+        try:
+            self._ensure_session()
+            self._start_index_feed()
+            now = time.monotonic()
+            out = []
+            for name, exch, token, subtitle, stocks in SECTOR_INDICES:
+                entry = self._idx_cache.get(token, {})
+                ltp, close, ts = entry.get("ltp"), entry.get("close"), entry.get("ts")
+                change = pct = None
+                if ltp is not None and close:
+                    change = round(ltp - close, 2)
+                    pct    = round(change / close * 100, 2)
+
+                stock_rows = []
+                for sym, stock_token in stocks:
+                    se   = self._idx_cache.get(stock_token, {})
+                    sltp = se.get("ltp")
+                    hist = self._stock_hist.get(stock_token, {})
+
+                    def _pct_vs(ref):
+                        if sltp is None or not ref:
+                            return None
+                        return round((sltp - ref) / ref * 100, 2)
+
+                    stock_rows.append({
+                        "symbol": sym,
+                        "ltp":    round(sltp, 2) if sltp is not None else None,
+                        "chg_7d":  _pct_vs(hist.get("c7")),
+                        "chg_30d": _pct_vs(hist.get("c30")),
+                        "chg_90d": _pct_vs(hist.get("c90")),
+                    })
+
+                out.append({
+                    "name": name, "exchange": exch, "subtitle": subtitle,
+                    "ltp": round(ltp, 2) if ltp is not None else None,
+                    "change": change, "pct_change": pct,
+                    "live": bool(ts and (now - ts) < 25),
+                    "stocks": stock_rows,
+                })
+            return out
+        except Exception as e:
+            logger.warning(f"get_sector_indices: {e}")
+            return []
 
     def get_option_ltp(self, symbol, token):
         try:
@@ -1729,13 +2046,26 @@ class AngelTrader:
                 elif self.position["active"]:
                     # Position open — full signal check is skipped, but keep the
                     # relevant indicator reference fresh so _manage_position's
-                    # exit check has current data to compare against.
+                    # exit check has current data to compare against. Still log
+                    # an activity entry each poll (trend + PCR) so "Recent
+                    # Activity" doesn't go silent for the whole life of a trade.
                     try:
                         df_nbees = self._fetch_nbees_only()
+                        trend = None
                         if self.strategy == "supertrend":
                             self._update_st_ref(df_nbees)
+                            st_val = self._st_ref.get("value")
+                            trend = "Uptrend" if st_val == 1 else "Downtrend" if st_val == -1 else None
                         else:
                             self._update_ema_ref(df_nbees)
+                            ema = self._ema_ref
+                            if ema.get("close") is not None and ema.get("ema9") is not None:
+                                trend = "Uptrend" if ema["close"] > ema["ema9"] else "Downtrend"
+
+                        pcr = self.get_nifty_pcr()
+                        parts = [p for p in (trend, f"PCR {pcr:.2f}" if pcr is not None else None) if p]
+                        detail = " · ".join(parts) if parts else "monitoring"
+                        self._log_activity("scan", f"Position open ({self.position['side']}) — {detail}")
                     except Exception as e:
                         logger.warning(f"Indicator ref refresh (position open) failed: {e}")
 

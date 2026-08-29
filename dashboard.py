@@ -123,6 +123,23 @@ def api_nifty_ltp():
     except Exception as e:
         return jsonify({"ltp": 0, "error": str(e)})
 
+@app.route("/api/indices")
+def api_indices():
+    try:
+        return jsonify({"indices": get_trader().get_indices(),
+                         "pcr": get_trader().get_nifty_pcr(),
+                         "time": datetime.now().strftime("%H:%M:%S")})
+    except Exception as e:
+        return jsonify({"indices": [], "pcr": None, "error": str(e)})
+
+@app.route("/api/sector-indices")
+def api_sector_indices():
+    try:
+        return jsonify({"indices": get_trader().get_sector_indices(),
+                         "time": datetime.now().strftime("%H:%M:%S")})
+    except Exception as e:
+        return jsonify({"indices": [], "error": str(e)})
+
 # ── API: Live state ───────────────────────────────────────────────
 
 @app.route("/api/live-state")
@@ -432,6 +449,8 @@ TEMPLATE = r"""
   .tab-i:hover{color:#5b5578}
   .pulse{animation:pulse 2s infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+  .idx-flash{animation:idxFlash 0.6s ease-out}
+  @keyframes idxFlash{0%{color:#7c3aed}100%{color:inherit}}
   .badge-live{background:#dcfce7;color:#16a34a;border:1px solid #86efac}
   .badge-stop{background:#f1effa;color:#6b6588;border:1px solid #ded8f2}
   .badge-mon {background:#fef9c3;color:#ca8a04;border:1px solid #fde047}
@@ -464,6 +483,12 @@ TEMPLATE = r"""
     <div class="flex items-center gap-3">
       <p class="text-sm font-bold text-gray-900">NIFTY 50</p>
       <p id="hdr-nifty" class="text-lg font-bold text-gray-900">—</p>
+      <span class="w-px h-5 bg-gray-200"></span>
+      <p class="text-sm font-bold text-gray-900">VIX</p>
+      <p id="hdr-vix" class="text-lg font-bold text-gray-900">—</p>
+      <span class="w-px h-5 bg-gray-200"></span>
+      <p class="text-sm font-bold text-gray-900">PCR</p>
+      <p id="hdr-pcr" class="text-lg font-bold text-gray-900">—</p>
     </div>
     <div class="flex items-center gap-5">
       <!-- Balance -->
@@ -483,6 +508,7 @@ TEMPLATE = r"""
 <div class="flex px-6 pt-3 border-b border-violet-100 bg-white/60">
   <button onclick="switchTab('live')"    id="tab-live"    class="tab-a  px-5 py-2 text-sm font-semibold">Live Trading</button>
   <button onclick="switchTab('history')" id="tab-history" class="tab-i  px-5 py-2 text-sm font-semibold">Trade History</button>
+  <button onclick="switchTab('index')"   id="tab-index"   class="tab-i  px-5 py-2 text-sm font-semibold">Index</button>
 </div>
 
 <!-- ══════════════ LIVE TAB ══════════════ -->
@@ -599,7 +625,7 @@ TEMPLATE = r"""
         <div class="pill px-3 py-2 flex items-center gap-2">
           <span class="icon-chip bg-green-100 text-green-600"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1" fill="currentColor"/></svg></span>
           <div><p id="hero-wr14" class="text-sm font-bold text-gray-900 leading-none">—</p>
-          <p class="text-[10px] text-gray-400 mt-0.5">14D Win Rate</p></div>
+          <p class="text-[10px] text-gray-400 mt-0.5">Month Win Rate</p></div>
         </div>
       </div>
 
@@ -615,10 +641,10 @@ TEMPLATE = r"""
     <!-- ═══ LEFT column ═══ -->
     <div class="lg:col-span-2 space-y-4">
 
-      <!-- ── 14-Day Performance ── -->
+      <!-- ── This Month's Performance ── -->
       <div class="card p-5">
         <div class="flex items-center justify-between mb-4">
-          <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold">14-Day Performance</p>
+          <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold">This Month's Performance</p>
           <span id="perf14-total" class="text-xs text-gray-400 pill px-2 py-0.5">— trades</span>
         </div>
         <div class="flex flex-wrap gap-8 mb-2">
@@ -701,7 +727,7 @@ TEMPLATE = r"""
         </div>
         <div class="card p-3">
           <span class="icon-chip bg-green-100 text-green-600 mb-2"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 21h8"/><path d="M12 17v4"/><path d="M7 4h10v5a5 5 0 0 1-10 0V4Z"/><path d="M17 5h2a2 2 0 0 1 0 4h-1"/><path d="M7 5H5a2 2 0 0 0 0 4h1"/></svg></span>
-          <p class="text-xs text-gray-400">Win Rate (14D)</p>
+          <p class="text-xs text-gray-400">Win Rate (Month)</p>
           <p id="mini-wr14" class="text-sm font-bold text-gray-800">—</p>
         </div>
       </div>
@@ -797,6 +823,17 @@ TEMPLATE = r"""
   </div>
 
 </div><!-- /pane-history -->
+
+<!-- ══════════════ INDEX TAB ══════════════ -->
+<div id="pane-index" class="p-5 hidden space-y-4">
+  <div class="flex items-center justify-between px-1">
+    <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold">Market Indices</p>
+    <p id="idx-updated" class="text-xs text-gray-400">NSE &amp; BSE &middot; Last updated —</p>
+  </div>
+  <div id="idx-grid" class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+    <!-- filled by renderIndices() -->
+  </div>
+</div><!-- /pane-index -->
 
 
 <!-- ══════════════ START TRADING MODAL ══════════════ -->
@@ -915,12 +952,87 @@ setInterval(tick,1000); tick();
 
 // ── Tabs ───────────────────────────────────────────────────────
 function switchTab(name){
-  ['live','history'].forEach(t=>{
+  ['live','history','index'].forEach(t=>{
     document.getElementById('pane-'+t).classList.toggle('hidden',t!==name);
     document.getElementById('tab-'+t).className=
       (t===name?'tab-a':'tab-i')+' px-5 py-2 text-sm font-semibold';
   });
   if(name==='history') renderCalendar();
+  if(name==='index')   loadIndices();
+}
+
+// ── Index tab ──────────────────────────────────────────────────
+let idxTimer = null;
+let idxPrevLtp = {};   // "IndexName" or "IndexName|SYMBOL" -> last ltp, so we can flash on change
+async function loadIndices(){
+  try{
+    const r = await fetch('/api/sector-indices');
+    const d = await r.json();
+    renderIndices(d.indices || []);
+    const anyLive = (d.indices || []).some(i=>i.live);
+    document.getElementById('idx-updated').innerHTML =
+      (anyLive ? '<span class="w-1.5 h-1.5 rounded-full bg-green-500 inline-block pulse mr-1"></span>Live &middot; '
+                : '') +
+      'NSE & BSE · Last updated ' + (d.time || '—');
+  }catch(e){ /* keep last render on transient failure */ }
+  if(!idxTimer) idxTimer = setInterval(loadIndices, 3000);
+}
+function pctCell(v){
+  if(v==null) return '<span class="text-gray-300">—</span>';
+  return `<span class="${cls(v)}">${v>=0?'+':''}${v.toFixed(2)}%</span>`;
+}
+function renderIndices(indices){
+  const grid = document.getElementById('idx-grid');
+  if(!indices.length){
+    grid.innerHTML = '<p class="text-sm text-gray-400 col-span-full text-center py-8">Index data unavailable — is the broker session connected?</p>';
+    return;
+  }
+  grid.innerHTML = indices.map(idx=>{
+    const up      = (idx.change ?? 0) >= 0;
+    const arrow    = up ? '▲' : '▼';
+    const ltp      = idx.ltp!=null ? idx.ltp.toLocaleString('en-IN',{maximumFractionDigits:2}) : '—';
+    const chg      = idx.change!=null ? `${up?'+':''}${idx.change.toLocaleString('en-IN',{maximumFractionDigits:2})} pts` : '—';
+    const pct      = idx.pct_change!=null ? `(${up?'+':''}${idx.pct_change.toFixed(2)}%)` : '';
+    const flashKey = idx.name;
+    const flash    = (idxPrevLtp[flashKey]!=null && idxPrevLtp[flashKey]!==idx.ltp) ? 'idx-flash' : '';
+    idxPrevLtp[flashKey] = idx.ltp;
+
+    const rows = (idx.stocks||[]).map(s=>{
+      const sKey  = idx.name+'|'+s.symbol;
+      const sFlash = (idxPrevLtp[sKey]!=null && idxPrevLtp[sKey]!==s.ltp) ? 'idx-flash' : '';
+      idxPrevLtp[sKey] = s.ltp;
+      const sLtp = s.ltp!=null ? s.ltp.toLocaleString('en-IN',{maximumFractionDigits:2}) : '—';
+      return `<tr class="border-t border-gray-100">
+        <td class="py-1.5 pr-2 font-semibold text-gray-700">${s.symbol}</td>
+        <td class="py-1.5 pr-2 text-right font-semibold ${sFlash}">${sLtp}</td>
+        <td class="py-1.5 pr-2 text-right">${pctCell(s.chg_7d)}</td>
+        <td class="py-1.5 pr-2 text-right">${pctCell(s.chg_30d)}</td>
+        <td class="py-1.5 text-right">${pctCell(s.chg_90d)}</td>
+      </tr>`;
+    }).join('');
+
+    return `<div class="card p-4" style="border-left:3px solid ${up?'#22c55e':'#ef4444'}">
+      <div class="flex items-center justify-between">
+        <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold">${idx.name}</p>
+        ${idx.live ? '<span class="w-1.5 h-1.5 rounded-full bg-green-500 pulse"></span>' : ''}
+      </div>
+      <p class="text-2xl font-extrabold text-gray-900 mt-1 ${flash}">${ltp}</p>
+      <p class="text-xs font-semibold ${cls(idx.change ?? 0)} mt-1">${arrow} ${chg} ${pct}</p>
+      <p class="text-xs text-gray-400 mt-1 mb-3">${idx.exchange} &middot; ${idx.subtitle}</p>
+      <table class="w-full text-xs">
+        <thead>
+          <tr class="text-gray-400">
+            <th class="text-left font-semibold pb-1">Stock</th>
+            <th class="text-right font-semibold pb-1">LTP</th>
+            <th class="text-right font-semibold pb-1">7D</th>
+            <th class="text-right font-semibold pb-1">30D</th>
+            <th class="text-right font-semibold pb-1">90D</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+  }).join('');
 }
 
 // ── Trade History (calendar view) ────────────────────────────────
@@ -980,12 +1092,7 @@ function renderCalendar(){
           const dayCap = dayTrades.reduce((a,t)=>a+(t.capital||0),0);
           const dayPct = dayCap ? (dayPnl/dayCap*100) : 0;
           cellTone = dayPnl>=0 ? 'bg-green-50 border-green-100' : 'bg-red-50 border-red-100';
-          const lines = dayTrades.map((t,i)=>
-            `<div class="flex justify-between text-xs"><span class="text-gray-400">Trade ${i+1}</span>`+
-            `<span class="${cls(t.pnl)} font-semibold">${t.pnl>=0?'+':''}${inr(t.pnl)}</span></div>`
-          ).join('');
-          inner += `<div class="space-y-0.5">${lines}</div>
-            <div class="border-t border-gray-200 mt-1.5 pt-1.5 space-y-0.5">
+          inner += `<div class="space-y-0.5">
               <div class="flex justify-between text-xs"><span class="text-gray-500 font-medium">Total P&amp;L</span>`+
               `<span class="${cls(dayPnl)} font-bold">${dayPnl>=0?'+':''}${inr(dayPnl)}</span></div>
               <div class="flex justify-between text-xs"><span class="text-gray-400">P&amp;L %</span>`+
@@ -1359,51 +1466,83 @@ function refreshBalance(){
 }
 setInterval(refreshBalance,30000); refreshBalance();
 
+// VIX + PCR beside NIFTY 50 in the header — visible on every tab, not just Index
+function refreshHeaderVix(){
+  fetch('/api/indices').then(r=>r.json()).then(d=>{
+    const vix = (d.indices||[]).find(i=>i.name==='INDIA VIX');
+    if(vix && vix.ltp!=null){
+      const el = document.getElementById('hdr-vix');
+      el.textContent = vix.ltp.toLocaleString('en-IN',{maximumFractionDigits:2});
+      el.className = 'text-lg font-bold ' + cls(vix.change ?? 0);
+    }
+    if(d.pcr!=null){
+      document.getElementById('hdr-pcr').textContent = d.pcr.toFixed(2);
+    }
+  }).catch(()=>{});
+}
+setInterval(refreshHeaderVix,5000); refreshHeaderVix();
+
 // 14-day win/loss performance (slow-moving — refresh every 60s)
-function renderSparkline(dayLabels, cumValues, dayDeltas){
+function renderSparkline(dayLabels, cumValues, dayDeltas, dayPercents){
   if(!cumValues.length || cumValues.every(v=>v===0))
     return '<p class="text-xs text-gray-400 text-center py-10">No trades in this window yet.</p>';
-  const w=600, h=180, pad=6, topPad=20;
+  const w=600, h=140, pad=6, topPad=26, botPad=26;
   const min=Math.min(0,...cumValues), max=Math.max(0,...cumValues);
   const range=(max-min)||1;
   const x = i => pad + i*(w-2*pad)/Math.max(1,cumValues.length-1);
-  const y = v => h-pad - (v-min)/(range)*(h-pad-topPad);
+  const y = v => h-botPad - (v-min)/range*(h-topPad-botPad);
   const pts = cumValues.map((v,i)=>[x(i),y(v)]);
   const line = pts.map((p,i)=>(i===0?'M':'L')+p[0].toFixed(1)+','+p[1].toFixed(1)).join(' ');
-  const area = line+` L${pts[pts.length-1][0].toFixed(1)},${(h-pad).toFixed(1)} L${pts[0][0].toFixed(1)},${(h-pad).toFixed(1)} Z`;
+  const area = line+` L${pts[pts.length-1][0].toFixed(1)},${(h-botPad).toFixed(1)} L${pts[0][0].toFixed(1)},${(h-botPad).toFixed(1)} Z`;
   const zeroY = y(0).toFixed(1);
   const last  = pts[pts.length-1];
   const lastVal = cumValues[cumValues.length-1];
   const lastLabel = (lastVal>=0?'+':'-')+'₹'+Math.abs(lastVal).toLocaleString('en-IN',{maximumFractionDigits:0});
 
-  // Per-day P&L labels above/below each point (skipped for zero-trade days)
-  const deltas = dayDeltas || [];
+  // Per-day P&L% labels — rendered as normal HTML overlaid on the SVG (not as
+  // SVG <text>) so they stay crisp; the chart itself uses preserveAspectRatio
+  // "none" to stretch edge-to-edge, which would otherwise squash/stretch glyphs.
+  // Always placed above the dot (never below), per design.
+  const deltas  = dayDeltas   || [];
+  const percents = dayPercents || [];
+  const n = pts.length;
   const labels = pts.map((p,i)=>{
     const dv = deltas[i] || 0;
     if(!dv) return '';
-    const txt   = (dv>=0?'+':'-')+Math.round(Math.abs(dv)).toLocaleString('en-IN');
-    const color = dv>=0 ? '#16a34a' : '#ef4444';
-    const above = p[1] > (topPad+10);
-    const ty    = above ? p[1]-8 : p[1]+14;
-    return `<text x="${p[0].toFixed(1)}" y="${ty.toFixed(1)}" font-size="9" font-weight="600" text-anchor="middle" fill="${color}">${txt}</text>`;
+    const pv     = percents[i] || 0;
+    const txt    = (pv>=0?'+':'-')+Math.abs(pv).toFixed(1)+'%';
+    const color  = dv>=0 ? 'text-green-600' : 'text-red-500';
+    const leftPct = p[0]/w*100;
+    const topPct  = p[1]/h*100;
+    const xAlign  = i===0 ? 'translate(0,' : (i===n-1 ? 'translate(-100%,' : 'translate(-50%,');
+    return `<span class="absolute text-[10px] font-bold ${color} whitespace-nowrap bg-white/80 px-0.5 rounded"
+        style="left:${leftPct.toFixed(2)}%; top:${topPct.toFixed(2)}%; transform:${xAlign}-100%); margin-top:-3px">${txt}</span>`;
   }).join('');
 
-  return `<svg viewBox="0 0 ${w} ${h}" class="w-full" preserveAspectRatio="none" style="height:9rem">
+  return `<div class="relative" style="height:9rem">
+    <svg viewBox="0 0 ${w} ${h}" class="w-full h-full absolute inset-0" preserveAspectRatio="none">
       <line x1="${pad}" y1="${zeroY}" x2="${w-pad}" y2="${zeroY}" stroke="#e9e4fb" stroke-width="1"/>
       <path d="${area}" fill="#7c3aed" fill-opacity="0.08" stroke="none"/>
       <path d="${line}" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
-      ${labels}
       <circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="4.5" fill="#7c3aed" stroke="#fff" stroke-width="2"/>
     </svg>
+    <div class="absolute inset-0">${labels}</div>
+    </div>
     <div class="flex justify-between text-[10px] text-gray-400 mt-1 px-0.5">
       <span>${dayLabels[0]}</span><span class="font-semibold text-violet-700">${lastLabel}</span><span>${dayLabels[dayLabels.length-1]}</span>
     </div>`;
 }
 
-function refreshPerf14(){
+function refreshPerfMonth(){
   const to   = new Date();
-  const from = new Date(to.getTime() - 13*24*60*60*1000);
-  const fmt  = d => d.toISOString().slice(0,10);
+  const from = new Date(to.getFullYear(), to.getMonth(), 1);   // 1st of current month
+  // Local-date formatting (not toISOString, which shifts by the UTC offset
+  // and would send e.g. IST midnight as the previous day) so the query
+  // range and each chart point line up with real calendar days.
+  const fmt  = dt => `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`;
+  const monthName = to.toLocaleDateString('en-IN',{month:'long'});
+  const daysSoFar = to.getDate();   // 1st .. today, inclusive
+
   fetch(`/api/trade-history?from=${fmt(from)}&to=${fmt(to)}`).then(r=>r.json()).then(d=>{
     const s      = d.summary || {};
     const wins   = s.wins   || 0;
@@ -1411,7 +1550,7 @@ function refreshPerf14(){
     const total  = s.total_trades || 0;
     const winRate = total ? s.win_rate : 0;
 
-    document.getElementById('perf14-total').textContent = total+' trade'+(total===1?'':'s')+' · 14 days';
+    document.getElementById('perf14-total').textContent = total+' trade'+(total===1?'':'s')+' · '+monthName;
     const pnlEl = document.getElementById('perf14-pnl');
     pnlEl.textContent = total ? (s.total_pnl>=0?'+':'')+inr(s.total_pnl) : '—';
     pnlEl.className   = 'text-2xl font-extrabold '+(total?cls(s.total_pnl):'text-gray-300');
@@ -1419,31 +1558,38 @@ function refreshPerf14(){
     document.getElementById('perf14-losses-n').textContent = losses;
     document.getElementById('perf14-winrate').textContent  = total ? winRate+'%' : '—';
 
-    // 14-day headline pills
+    // Month-to-date headline pills
     const wr14a = document.getElementById('hero-wr14');
     const wr14b = document.getElementById('mini-wr14');
     wr14a.textContent = total ? winRate+'%' : '—';
     wr14b.textContent = total ? winRate+'%' : '—';
 
-    // Build a daily cumulative P&L series across all 14 calendar days
-    // (including zero-trade days, so the line reflects real gaps).
-    const byDate = {};
-    (d.trades||[]).forEach(t=>{ if(t.pnl!=null) byDate[t.date]=(byDate[t.date]||0)+t.pnl; });
-    const dayLabels=[], cumValues=[], dayDeltas=[];
+    // Build a daily cumulative P&L series across every day of the month so
+    // far (including zero-trade days, so the line reflects real gaps).
+    const byDate = {}, byDateCap = {};
+    (d.trades||[]).forEach(t=>{
+      if(t.pnl!=null){
+        byDate[t.date]    = (byDate[t.date]||0)    + t.pnl;
+        byDateCap[t.date] = (byDateCap[t.date]||0) + (t.capital||0);
+      }
+    });
+    const dayLabels=[], cumValues=[], dayDeltas=[], dayPercents=[];
     let running=0;
-    for(let i=13;i>=0;i--){
-      const dt = new Date(to.getTime()-i*24*60*60*1000);
-      const key = dt.toISOString().slice(0,10);
+    for(let day=1; day<=daysSoFar; day++){
+      const dt = new Date(to.getFullYear(), to.getMonth(), day);
+      const key = fmt(dt);
       const delta = byDate[key]||0;
+      const cap   = byDateCap[key]||0;
       running += delta;
       dayLabels.push(dt.toLocaleDateString('en-IN',{day:'2-digit',month:'short'}));
       cumValues.push(Math.round(running));
       dayDeltas.push(Math.round(delta));
+      dayPercents.push(cap ? (delta/cap*100) : 0);
     }
-    document.getElementById('perf14-chart').innerHTML = renderSparkline(dayLabels, cumValues, dayDeltas);
+    document.getElementById('perf14-chart').innerHTML = renderSparkline(dayLabels, cumValues, dayDeltas, dayPercents);
   }).catch(()=>{});
 }
-setInterval(refreshPerf14,60000); refreshPerf14();
+setInterval(refreshPerfMonth,60000); refreshPerfMonth();
 
 // ── Start Trading Modal ───────────────────────────────────────
 function openStartModal(){
