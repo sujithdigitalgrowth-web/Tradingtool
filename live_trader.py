@@ -423,16 +423,20 @@ class AngelTrader:
         self._ws_feed   = None
         self._ws_thread = None
 
-        # Index quotes (dashboard "Index" tab) — independent of trade state,
-        # runs for the app's lifetime once logged in. WS pushes live LTP;
-        # a slow REST poll keeps "close" (and LTP as a fallback) fresh.
+        # Header VIX — real-time, independent of trade state: small WS+REST
+        # feed, same pattern as the option tick feed but for one index token.
         self._idx_cache      = {}     # token -> {"ltp":, "close":, "ts": monotonic}
-        self._idx_ws_feed    = None
-        self._idx_ws_thread  = None
-        self._idx_rest_thread = None
-        self._idx_started    = False
+        self._vix_ws_feed    = None
+        self._vix_started    = False
         self._idx_epoch      = 0      # bumped on relogin so old feed loops exit
-        self._stock_hist      = {}    # token -> {"c7":, "c30":, "c90":} reference closes
+
+        # Sector index tab — deliberately NOT real-time (96 constituent-stock
+        # quotes + historical fetches would otherwise compete with the bot's
+        # own signal-loop candle fetches during market hours). Refreshed once
+        # per day, only after INDEX_REFRESH_AFTER (market close).
+        self._sector_started    = False
+        self._sector_fetch_date = None
+        self._stock_hist      = {}    # token -> {"c7":, "c90":, "c365":} reference closes
         self._stock_hist_date = None
 
         # Live NIFTY Put-Call Ratio for the header — current snapshot only,
@@ -527,15 +531,17 @@ class AngelTrader:
         self.last_error = None
         _setup_logfile()
 
-        # Re-login (initial or 6.5h refresh) invalidates any running index
-        # feed's auth token — bump the epoch so old feed/REST loops exit
-        # instead of piling up, then rebuild fresh.
+        # Re-login (initial or 6.5h refresh) invalidates any running feed's
+        # auth token — bump the epoch so old feed/REST loops exit instead of
+        # piling up, then rebuild fresh.
         self._idx_epoch += 1
-        if self._idx_ws_feed:
-            self._idx_ws_feed.stop()
-            self._idx_ws_feed = None
-        self._idx_started = False
-        self._start_index_feed()
+        if self._vix_ws_feed:
+            self._vix_ws_feed.stop()
+            self._vix_ws_feed = None
+        self._vix_started   = False
+        self._sector_started = False
+        self._start_vix_feed()
+        self._start_sector_feed()
         logger.info("AngelTrader: login OK")
 
     def _ensure_session(self):
@@ -591,29 +597,41 @@ class AngelTrader:
             logger.warning(f"get_nifty_ltp: {e}")
         return self.nifty_ltp
 
-    # ── Index quotes (dashboard "Index" tab + header VIX) ───────────
-    # Runs independently of trade state: one shared WebSocket stream for
-    # live LTP ticks, a slow REST poll as the source of "close" (and a
-    # fallback when the market's shut or the socket drops), and a once-
-    # daily historical pass for each constituent stock's 7d/30d/90d change.
+    # ── Header VIX (real-time) + Sector Index tab (once-daily) ──────
+    # Two deliberately separate feeds. VIX is a single token, cheap to keep
+    # live via WebSocket. The sector-index tab's ~11 indices + ~96
+    # constituent stocks are NOT kept real-time — that many quote/historical
+    # calls competing with the bot's own signal-loop candle fetches during
+    # market hours is exactly the overlap risk flagged and asked to be
+    # removed. Instead it refreshes once per day, only after market close.
+
+    INDEX_REFRESH_AFTER = "15:30"   # sector tab only refreshes after this time
 
     @staticmethod
-    def _all_quote_tokens():
-        """{exchange: [token, ...]} for every index + constituent stock we track."""
+    def _quote_token_groups(entries):
+        """entries: iterable of (exchange, token, ...) tuples (INDEX_QUOTES'
+        or SECTOR_INDICES' shape both start this way). Returns {exchange:
+        [token,...]}."""
         groups = {}
-        for exch, token, _name, _subtitle in INDEX_QUOTES:
+        for exch, token, *_rest in entries:
             groups.setdefault(exch, set()).add(token)
+        return {exch: sorted(toks) for exch, toks in groups.items()}
+
+    @staticmethod
+    def _sector_token_groups():
+        groups = {}
         for _name, exch, token, _subtitle, stocks in SECTOR_INDICES:
             groups.setdefault(exch, set()).add(token)
             for _sym, stock_token in stocks:
                 groups.setdefault("NSE", set()).add(stock_token)
         return {exch: sorted(toks) for exch, toks in groups.items()}
 
-    def _fetch_indices_rest(self):
-        """Batched quote calls (chunked to stay under Angel's per-request cap)
-        — refreshes ltp+close for every index and constituent-stock token."""
+    def _fetch_quote_batch(self, token_groups: dict):
+        """Batched quote calls (chunked to stay under Angel's per-request
+        cap) — refreshes ltp+close in self._idx_cache for every token in
+        token_groups."""
         now = time.monotonic()
-        for exch, tokens in self._all_quote_tokens().items():
+        for exch, tokens in token_groups.items():
             for i in range(0, len(tokens), 40):
                 chunk = tokens[i:i + 40]
                 resp = self._obj.getMarketData("FULL", {exch: chunk})
@@ -641,11 +659,8 @@ class AngelTrader:
         return float(closes[mask].iloc[-1])
 
     def _fetch_stock_history(self):
-        """Refresh 7d/90d/1y reference closes for every constituent stock.
-        Daily candles don't change intraday, so this only re-fetches once/day."""
+        """Refresh 7d/90d/1y reference closes for every constituent stock."""
         today = _today()
-        if self._stock_hist_date == today:
-            return
         from angel_data import _fetch_daily
         api_key = os.getenv("ANGEL_API_KEY", "")
         seen, hist = set(), {}
@@ -669,75 +684,65 @@ class AngelTrader:
                 time.sleep(0.35)   # stay well under Angel's historical-API rate limit
         # If most fetches failed (e.g. Angel rate-limiting/403s), don't mark
         # today as "done" — that would silently strand the 7D/90D/1Y columns
-        # blank until tomorrow, since the hourly re-check no-ops once
-        # _stock_hist_date == today. Keep whatever partial data we got and
-        # let the next hourly pass retry the rest.
+        # blank until tomorrow. Keep whatever partial data we got and let the
+        # caller retry later the same day.
         if len(hist) < len(seen) * 0.5:
-            logger.warning(f"Stock history fetch mostly failed ({len(hist)}/{len(seen)}) — will retry within the hour")
+            logger.warning(f"Stock history fetch mostly failed ({len(hist)}/{len(seen)}) — will retry later today")
             self._stock_hist.update(hist)
-            return
+            return False
         self._stock_hist      = hist
         self._stock_hist_date = today
         logger.info(f"Stock history refreshed: {len(hist)} symbols")
+        return True
 
-    def _start_index_feed(self):
-        if self._idx_started or not (self._auth and self._feed_token):
+    # ── VIX feed: real-time, WS + REST ───────────────────────────────
+
+    def _start_vix_feed(self):
+        if self._vix_started or not (self._auth and self._feed_token):
             return
-        self._idx_started = True
+        self._vix_started = True
         my_epoch = self._idx_epoch
+        vix_groups = self._quote_token_groups(INDEX_QUOTES)
 
         def _rest_loop():
             while self._idx_epoch == my_epoch:
                 try:
-                    self._fetch_indices_rest()
+                    self._fetch_quote_batch(vix_groups)
                 except Exception as e:
-                    logger.warning(f"index REST refresh: {e}")
+                    logger.warning(f"VIX REST refresh: {e}")
                 time.sleep(20)
 
-        def _hist_loop():
-            while self._idx_epoch == my_epoch:
-                try:
-                    self._fetch_stock_history()
-                except Exception as e:
-                    logger.warning(f"stock history refresh: {e}")
-                time.sleep(3600)   # cheap re-check; the fetch itself no-ops same-day
-
-        def _on_idx_tick(token, ltp):
+        def _on_tick(token, ltp):
             entry = self._idx_cache.setdefault(token, {})
             entry["ltp"] = ltp
             entry["ts"]  = time.monotonic()
 
         def _ws_loop():
             client_code = os.getenv("ANGEL_CLIENT_ID", "")
-            groups = {}
-            for exch, tokens in self._all_quote_tokens().items():
-                groups[1 if exch == "NSE" else 3] = tokens
+            groups = {1 if exch == "NSE" else 3: tokens for exch, tokens in vix_groups.items()}
             while self._idx_epoch == my_epoch:
                 try:
-                    feed = _TickFeed(self._auth, client_code, self._feed_token, _on_idx_tick)
+                    feed = _TickFeed(self._auth, client_code, self._feed_token, _on_tick)
                     feed.subscribe_groups(groups)
-                    self._idx_ws_feed = feed
+                    self._vix_ws_feed = feed
                     feed.connect()   # blocks until dropped
                 except Exception as e:
-                    logger.warning(f"index TickFeed disconnected: {e}")
+                    logger.warning(f"VIX TickFeed disconnected: {e}")
                 if self._idx_epoch == my_epoch:
                     time.sleep(3)
 
         try:
-            self._fetch_indices_rest()   # seed the cache before the first request lands
+            self._fetch_quote_batch(vix_groups)   # seed before the first request lands
         except Exception as e:
-            logger.warning(f"index REST seed: {e}")
+            logger.warning(f"VIX REST seed: {e}")
 
-        self._idx_rest_thread = threading.Thread(target=_rest_loop, daemon=True, name="IndexRest")
-        self._idx_rest_thread.start()
-        self._idx_ws_thread = threading.Thread(target=_ws_loop, daemon=True, name="IndexTickFeed")
-        self._idx_ws_thread.start()
-        threading.Thread(target=_hist_loop, daemon=True, name="StockHistory").start()
+        threading.Thread(target=_rest_loop, daemon=True, name="VixRest").start()
+        threading.Thread(target=_ws_loop, daemon=True, name="VixTickFeed").start()
 
     def get_indices(self):
         try:
             self._ensure_session()
-            self._start_index_feed()
+            self._start_vix_feed()
             out = []
             now = time.monotonic()
             for exch, token, name, subtitle in INDEX_QUOTES:
@@ -776,15 +781,44 @@ class AngelTrader:
             logger.warning(f"get_nifty_pcr: {e}")
         return self._pcr_cache["value"]
 
+    # ── Sector Index tab: once-daily snapshot, no WebSocket ──────────
+
+    def _start_sector_feed(self):
+        if self._sector_started or not (self._auth and self._feed_token):
+            return
+        self._sector_started = True
+        my_epoch = self._idx_epoch
+
+        def _daily_loop():
+            while self._idx_epoch == my_epoch:
+                try:
+                    self._maybe_refresh_sector_snapshot()
+                except Exception as e:
+                    logger.warning(f"sector snapshot refresh: {e}")
+                time.sleep(300)   # check every 5 min whether today's post-close snapshot is due
+
+        threading.Thread(target=_daily_loop, daemon=True, name="SectorDailySnapshot").start()
+
+    def _maybe_refresh_sector_snapshot(self):
+        today = _today()
+        if self._sector_fetch_date == today:
+            return
+        if _now().strftime("%H:%M") < self.INDEX_REFRESH_AFTER:
+            return
+        self._fetch_quote_batch(self._sector_token_groups())
+        if self._fetch_stock_history():
+            self._sector_fetch_date = today
+            logger.info(f"Sector index snapshot refreshed for {today}")
+
     def get_sector_indices(self):
         try:
             self._ensure_session()
-            self._start_index_feed()
-            now = time.monotonic()
+            self._start_sector_feed()
+            is_today = self._sector_fetch_date == _today()
             out = []
             for name, exch, token, subtitle, stocks in SECTOR_INDICES:
                 entry = self._idx_cache.get(token, {})
-                ltp, close, ts = entry.get("ltp"), entry.get("close"), entry.get("ts")
+                ltp, close = entry.get("ltp"), entry.get("close")
                 change = pct = None
                 if ltp is not None and close:
                     change = round(ltp - close, 2)
@@ -813,7 +847,7 @@ class AngelTrader:
                     "name": name, "exchange": exch, "subtitle": subtitle,
                     "ltp": round(ltp, 2) if ltp is not None else None,
                     "change": change, "pct_change": pct,
-                    "live": bool(ts and (now - ts) < 25),
+                    "live": is_today,   # "live" here means "today's post-close snapshot", not real-time
                     "stocks": stock_rows,
                 })
             return out

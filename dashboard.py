@@ -962,6 +962,11 @@ function switchTab(name){
 }
 
 // ── Index tab ──────────────────────────────────────────────────
+// Deliberately NOT real-time — refreshes once/day server-side, after market
+// close (15:30), so it never competes with the bot's own signal-loop candle
+// fetches during trading hours. This polls a cheap in-memory cache, not the
+// broker, so a slow client-side interval is just to catch that daily update
+// if the tab's left open across the close.
 let idxTimer = null;
 let idxPrevLtp = {};   // "IndexName" or "IndexName|SYMBOL" -> last ltp, so we can flash on change
 async function loadIndices(){
@@ -969,13 +974,13 @@ async function loadIndices(){
     const r = await fetch('/api/sector-indices');
     const d = await r.json();
     renderIndices(d.indices || []);
-    const anyLive = (d.indices || []).some(i=>i.live);
+    const isToday = (d.indices || []).some(i=>i.live);
     document.getElementById('idx-updated').innerHTML =
-      (anyLive ? '<span class="w-1.5 h-1.5 rounded-full bg-green-500 inline-block pulse mr-1"></span>Live &middot; '
-                : '') +
-      'NSE & BSE · Last updated ' + (d.time || '—');
+      (isToday ? '<span class="w-1.5 h-1.5 rounded-full bg-green-500 inline-block mr-1"></span>Today\'s close &middot; '
+                : '<span class="w-1.5 h-1.5 rounded-full bg-gray-300 inline-block mr-1"></span>Showing a previous day\'s close &middot; ') +
+      'NSE & BSE · Refreshes daily after 3:30pm · Last checked ' + (d.time || '—');
   }catch(e){ /* keep last render on transient failure */ }
-  if(!idxTimer) idxTimer = setInterval(loadIndices, 3000);
+  if(!idxTimer) idxTimer = setInterval(loadIndices, 300000);
 }
 function pctCell(v){
   if(v==null) return '<span class="text-gray-300">—</span>';
@@ -1027,7 +1032,7 @@ function renderIndices(indices){
     return `<div class="card p-4" style="border-left:3px solid ${up?'#22c55e':'#ef4444'}">
       <div class="flex items-center justify-between">
         <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold">${idx.name}</p>
-        ${idx.live ? '<span class="w-1.5 h-1.5 rounded-full bg-green-500 pulse"></span>' : ''}
+        ${idx.live ? '<span class="w-1.5 h-1.5 rounded-full bg-green-500" title="Today\'s close"></span>' : ''}
       </div>
       <p class="text-2xl font-extrabold text-gray-900 mt-1 ${flash}">${ltp}</p>
       <p class="text-xs font-semibold ${cls(idx.change ?? 0)} mt-1">${arrow} ${chg} ${pct}</p>
