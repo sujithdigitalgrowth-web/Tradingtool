@@ -82,58 +82,81 @@ INDEX_QUOTES = [
 # ── Sector index cards on the dashboard's "Index" tab ──────────────
 # (display name, exchange, index token, subtitle, [(stock symbol, NSE-EQ token), ...])
 #
-# The 5 constituent stocks per sector are a manually curated snapshot of
-# well-known large caps — Angel's API has no live index-weights endpoint,
-# so this isn't pulled from an official "top 5 by weight" feed. Revisit
+# The 10 constituent stocks per sector are a manually curated snapshot of
+# well-known large/mid caps — Angel's API has no live index-weights endpoint,
+# so this isn't pulled from an official "top 10 by weight" feed. Revisit
 # periodically; NSE rebalances sector indices a few times a year.
 SECTOR_INDICES = [
     ("NIFTY 50", "NSE", "99926000", "50 large-cap stocks", [
         ("HDFCBANK", "1333"), ("RELIANCE", "2885"), ("ICICIBANK", "4963"),
-        ("INFY", "1594"), ("TCS", "11536"),
+        ("INFY", "1594"), ("TCS", "11536"), ("LT", "11483"), ("SBIN", "3045"),
+        ("BHARTIARTL", "10604"), ("ITC", "1660"), ("AXISBANK", "5900"),
     ]),
     ("NIFTY BANK", "NSE", "99926009", "Banking sector", [
         ("HDFCBANK", "1333"), ("ICICIBANK", "4963"), ("KOTAKBANK", "1922"),
-        ("AXISBANK", "5900"), ("SBIN", "3045"),
+        ("AXISBANK", "5900"), ("SBIN", "3045"), ("INDUSINDBK", "5258"),
+        ("BANKBARODA", "4668"), ("PNB", "10666"), ("AUBANK", "21238"),
+        ("FEDERALBNK", "1023"),
     ]),
     ("NIFTY PSU BANK", "NSE", "99926025", "PSU banks", [
         ("SBIN", "3045"), ("BANKBARODA", "4668"), ("PNB", "10666"),
-        ("CANBK", "10794"), ("UNIONBANK", "10753"),
+        ("CANBK", "10794"), ("UNIONBANK", "10753"), ("INDIANB", "14309"),
+        ("BANKINDIA", "4745"), ("IOB", "9348"), ("UCOBANK", "11223"),
+        ("MAHABANK", "11377"),
     ]),
     ("NIFTY PVT BANK", "NSE", "99926047", "Private banks", [
         ("HDFCBANK", "1333"), ("ICICIBANK", "4963"), ("KOTAKBANK", "1922"),
-        ("AXISBANK", "5900"), ("INDUSINDBK", "5258"),
+        ("AXISBANK", "5900"), ("INDUSINDBK", "5258"), ("FEDERALBNK", "1023"),
+        ("IDFCFIRSTB", "11184"), ("BANDHANBNK", "2263"), ("RBLBANK", "18391"),
+        ("AUBANK", "21238"),
     ]),
     ("NIFTY FMCG", "NSE", "99926021", "FMCG sector", [
         ("ITC", "1660"), ("HINDUNILVR", "1394"), ("NESTLEIND", "17963"),
-        ("VBL", "18921"), ("BRITANNIA", "547"),
+        ("VBL", "18921"), ("BRITANNIA", "547"), ("TATACONSUM", "3432"),
+        ("DABUR", "772"), ("MARICO", "4067"), ("GODREJCP", "10099"),
+        ("COLPAL", "15141"),
     ]),
     ("NIFTY IT", "NSE", "99926008", "Technology sector", [
         ("TCS", "11536"), ("INFY", "1594"), ("HCLTECH", "7229"),
-        ("WIPRO", "3787"), ("TECHM", "13538"),
+        ("WIPRO", "3787"), ("TECHM", "13538"), ("KPITTECH", "9683"),
+        ("PERSISTENT", "18365"), ("COFORGE", "11543"), ("MPHASIS", "4503"),
+        ("OFSS", "10738"),
     ]),
     ("NIFTY MEDIA", "NSE", "99926031", "Media & entertainment", [
         ("ZEEL", "3812"), ("SUNTV", "13404"), ("PVRINOX", "13147"),
-        ("SAREGAMA", "4892"), ("NETWORK18", "14111"),
+        ("SAREGAMA", "4892"), ("NETWORK18", "14111"), ("TIPSMUSIC", "9117"),
+        ("NAZARA", "2987"), ("HATHWAY", "18154"), ("DISHTV", "14537"),
+        ("BALAJITELE", "9158"),
     ]),
     ("NIFTY ENERGY", "NSE", "99926020", "Energy sector", [
         ("RELIANCE", "2885"), ("ONGC", "2475"), ("NTPC", "11630"),
-        ("POWERGRID", "14977"), ("COALINDIA", "20374"),
+        ("POWERGRID", "14977"), ("COALINDIA", "20374"), ("BPCL", "526"),
+        ("IOC", "1624"), ("GAIL", "4717"), ("TATAPOWER", "3426"),
+        ("ADANIGREEN", "3563"),
     ]),
     ("NIFTY METAL", "NSE", "99926030", "Metal & mining", [
         ("TATASTEEL", "3499"), ("JSWSTEEL", "11723"), ("HINDALCO", "1363"),
-        ("VEDL", "3063"), ("JINDALSTEL", "6733"),
+        ("VEDL", "3063"), ("JINDALSTEL", "6733"), ("SAIL", "2963"),
+        ("NMDC", "15332"), ("NATIONALUM", "6364"), ("HINDZINC", "1424"),
+        ("APLAPOLLO", "25780"),
     ]),
     ("NIFTY PHARMA", "NSE", "99926023", "Pharma sector", [
         ("SUNPHARMA", "3351"), ("CIPLA", "694"), ("DRREDDY", "881"),
-        ("DIVISLAB", "10940"), ("LUPIN", "10440"),
+        ("DIVISLAB", "10940"), ("LUPIN", "10440"), ("AUROPHARMA", "275"),
+        ("TORNTPHARM", "3518"), ("ALKEM", "11703"), ("ZYDUSLIFE", "7929"),
+        ("BIOCON", "11373"),
     ]),
     ("BSE HEALTHCARE", "BSE", "99919009", "Healthcare (BSE index)", [
         ("SUNPHARMA", "3351"), ("APOLLOHOSP", "157"), ("CIPLA", "694"),
-        ("DIVISLAB", "10940"), ("DRREDDY", "881"),
+        ("DIVISLAB", "10940"), ("DRREDDY", "881"), ("MAXHEALTH", "22377"),
+        ("FORTIS", "14592"), ("LUPIN", "10440"), ("AUROPHARMA", "275"),
+        ("TORNTPHARM", "3518"),
     ]),
     ("BSE CONSUMER DURABLES", "BSE", "99919008", "Consumer durables (BSE index)", [
         ("TITAN", "3506"), ("VOLTAS", "3718"), ("HAVELLS", "9819"),
-        ("CROMPTON", "17094"), ("DIXON", "21690"),
+        ("CROMPTON", "17094"), ("DIXON", "21690"), ("BLUESTARCO", "8311"),
+        ("WHIRLPOOL", "18011"), ("POLYCAB", "9590"), ("AMBER", "1185"),
+        ("VGUARD", "15362"),
     ]),
 ]
 
@@ -618,7 +641,7 @@ class AngelTrader:
         return float(closes[mask].iloc[-1])
 
     def _fetch_stock_history(self):
-        """Refresh 7d/30d/90d reference closes for every constituent stock.
+        """Refresh 7d/90d/1y reference closes for every constituent stock.
         Daily candles don't change intraday, so this only re-fetches once/day."""
         today = _today()
         if self._stock_hist_date == today:
@@ -633,17 +656,26 @@ class AngelTrader:
                 seen.add(token)
                 try:
                     df = _fetch_daily(self._auth, api_key, token,
-                                      today - timedelta(days=120), today)
+                                      today - timedelta(days=400), today)
                     if not df.empty:
                         closes = df["Close"]
                         hist[token] = {
-                            "c7":  self._closest_close(closes, today - timedelta(days=7)),
-                            "c30": self._closest_close(closes, today - timedelta(days=30)),
-                            "c90": self._closest_close(closes, today - timedelta(days=90)),
+                            "c7":   self._closest_close(closes, today - timedelta(days=7)),
+                            "c90":  self._closest_close(closes, today - timedelta(days=90)),
+                            "c365": self._closest_close(closes, today - timedelta(days=365)),
                         }
                 except Exception as e:
                     logger.warning(f"stock history {sym}: {e}")
                 time.sleep(0.35)   # stay well under Angel's historical-API rate limit
+        # If most fetches failed (e.g. Angel rate-limiting/403s), don't mark
+        # today as "done" — that would silently strand the 7D/90D/1Y columns
+        # blank until tomorrow, since the hourly re-check no-ops once
+        # _stock_hist_date == today. Keep whatever partial data we got and
+        # let the next hourly pass retry the rest.
+        if len(hist) < len(seen) * 0.5:
+            logger.warning(f"Stock history fetch mostly failed ({len(hist)}/{len(seen)}) — will retry within the hour")
+            self._stock_hist.update(hist)
+            return
         self._stock_hist      = hist
         self._stock_hist_date = today
         logger.info(f"Stock history refreshed: {len(hist)} symbols")
@@ -773,8 +805,8 @@ class AngelTrader:
                         "symbol": sym,
                         "ltp":    round(sltp, 2) if sltp is not None else None,
                         "chg_7d":  _pct_vs(hist.get("c7")),
-                        "chg_30d": _pct_vs(hist.get("c30")),
                         "chg_90d": _pct_vs(hist.get("c90")),
+                        "chg_1y":  _pct_vs(hist.get("c365")),
                     })
 
                 out.append({

@@ -997,17 +997,30 @@ function renderIndices(indices){
     const flash    = (idxPrevLtp[flashKey]!=null && idxPrevLtp[flashKey]!==idx.ltp) ? 'idx-flash' : '';
     idxPrevLtp[flashKey] = idx.ltp;
 
-    const rows = (idx.stocks||[]).map(s=>{
+    // Best/worst 7-day performer in this sector, so they can be highlighted —
+    // only among stocks that actually have a 7D figure (chg_7d != null).
+    const stocks = idx.stocks || [];
+    const scored7d = stocks.map((s,i)=>({i, v:s.chg_7d})).filter(x=>x.v!=null);
+    let bestI = null, worstI = null;
+    if(scored7d.length){
+      bestI  = scored7d.reduce((a,b)=>b.v>a.v?b:a).i;
+      worstI = scored7d.reduce((a,b)=>b.v<a.v?b:a).i;
+      if(bestI===worstI){ bestI=null; worstI=null; }   // only one scoreable stock — nothing to contrast
+    }
+
+    const rows = stocks.map((s,i)=>{
       const sKey  = idx.name+'|'+s.symbol;
       const sFlash = (idxPrevLtp[sKey]!=null && idxPrevLtp[sKey]!==s.ltp) ? 'idx-flash' : '';
       idxPrevLtp[sKey] = s.ltp;
       const sLtp = s.ltp!=null ? s.ltp.toLocaleString('en-IN',{maximumFractionDigits:2}) : '—';
-      return `<tr class="border-t border-gray-100">
-        <td class="py-1.5 pr-2 font-semibold text-gray-700">${s.symbol}</td>
+      const rowTone = i===bestI ? 'bg-green-50' : i===worstI ? 'bg-red-50' : '';
+      const badge   = i===bestI ? ' 🏆' : i===worstI ? ' 📉' : '';
+      return `<tr class="border-t border-gray-100 ${rowTone}">
+        <td class="py-1.5 pr-2 font-semibold text-gray-700">${s.symbol}${badge}</td>
         <td class="py-1.5 pr-2 text-right font-semibold ${sFlash}">${sLtp}</td>
         <td class="py-1.5 pr-2 text-right">${pctCell(s.chg_7d)}</td>
-        <td class="py-1.5 pr-2 text-right">${pctCell(s.chg_30d)}</td>
-        <td class="py-1.5 text-right">${pctCell(s.chg_90d)}</td>
+        <td class="py-1.5 pr-2 text-right">${pctCell(s.chg_90d)}</td>
+        <td class="py-1.5 text-right">${pctCell(s.chg_1y)}</td>
       </tr>`;
     }).join('');
 
@@ -1025,8 +1038,8 @@ function renderIndices(indices){
             <th class="text-left font-semibold pb-1">Stock</th>
             <th class="text-right font-semibold pb-1">LTP</th>
             <th class="text-right font-semibold pb-1">7D</th>
-            <th class="text-right font-semibold pb-1">30D</th>
             <th class="text-right font-semibold pb-1">90D</th>
+            <th class="text-right font-semibold pb-1">1Y</th>
           </tr>
         </thead>
         <tbody>${rows}</tbody>
