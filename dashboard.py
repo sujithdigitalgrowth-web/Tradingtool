@@ -997,14 +997,14 @@ function renderIndices(indices){
     const flash    = (idxPrevLtp[flashKey]!=null && idxPrevLtp[flashKey]!==idx.ltp) ? 'idx-flash' : '';
     idxPrevLtp[flashKey] = idx.ltp;
 
-    // Best/worst 7-day performer in this sector, so they can be highlighted —
-    // only among stocks that actually have a 7D figure (chg_7d != null).
+    // Best/worst 1-year performer in this sector, so they can be highlighted —
+    // only among stocks that actually have a 1Y figure (chg_1y != null).
     const stocks = idx.stocks || [];
-    const scored7d = stocks.map((s,i)=>({i, v:s.chg_7d})).filter(x=>x.v!=null);
+    const scored1y = stocks.map((s,i)=>({i, v:s.chg_1y})).filter(x=>x.v!=null);
     let bestI = null, worstI = null;
-    if(scored7d.length){
-      bestI  = scored7d.reduce((a,b)=>b.v>a.v?b:a).i;
-      worstI = scored7d.reduce((a,b)=>b.v<a.v?b:a).i;
+    if(scored1y.length){
+      bestI  = scored1y.reduce((a,b)=>b.v>a.v?b:a).i;
+      worstI = scored1y.reduce((a,b)=>b.v<a.v?b:a).i;
       if(bestI===worstI){ bestI=null; worstI=null; }   // only one scoreable stock — nothing to contrast
     }
 
