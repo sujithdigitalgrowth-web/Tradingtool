@@ -1243,6 +1243,40 @@ class AngelTrader:
             self.last_error = f"Order exception: {e}"
             return None
 
+    def _confirm_order(self, order_id, attempts: int = 6, delay: float = 1.0):
+        """Poll orderBook() to find out whether `order_id` actually filled,
+        was rejected/cancelled, or is still unresolved — placeOrder()
+        returning status:true only means the order was ACCEPTED for
+        submission, not that it executed. A market order on a liquid NFO
+        option normally resolves within 1-2s, so this is a short, bounded
+        poll (default ~6s), not a long-running wait.
+
+        Returns (status, fill_price, raw_row):
+          "complete" - confirmed filled; fill_price is the average fill price
+          "rejected" - confirmed rejected/cancelled by the exchange; fill_price is None
+          "unknown"  - could not confirm either way within the poll window
+                       (API hiccup, not order ambiguity) — caller should
+                       proceed optimistically but alert for manual reconciliation
+        """
+        for _ in range(attempts):
+            try:
+                ob = self._obj.orderBook()
+                if ob and ob.get("status") and ob.get("data"):
+                    for row in ob["data"]:
+                        if str(row.get("orderid")) != str(order_id):
+                            continue
+                        st = str(row.get("orderstatus", "")).strip().lower()
+                        if st in ("complete", "executed"):
+                            fp = float(row.get("averageprice") or 0) or None
+                            return "complete", fp, row
+                        if st in ("rejected", "cancelled", "canceled"):
+                            return "rejected", None, row
+                        break   # open / trigger pending / pending -> keep polling
+            except Exception as e:
+                logger.warning(f"orderBook poll failed for order {order_id}: {e}")
+            time.sleep(delay)
+        return "unknown", None, None
+
     # ── Entry ─────────────────────────────────────────────────────
 
     def _enter(self, signal, force_strike=None, is_test=False):
@@ -1341,20 +1375,27 @@ class AngelTrader:
                     f"Time   : {_now().strftime('%H:%M:%S')}")
                 return False
             order_id = resp.get("data", {}).get("orderid", "—")
-            # Use actual fill price from Angel One tradeBook, matched by exact order ID
-            # (not just symbol/side — the same strike can be bought more than once a day).
-            try:
-                import time as _time; _time.sleep(1)
-                tb = self._obj.tradeBook()
-                if tb and tb.get("status") and tb.get("data") and order_id != "—":
-                    for row in tb["data"]:
-                        if str(row.get("orderid")) == str(order_id):
-                            fill = float(row.get("fillprice") or 0)
-                            if fill:
-                                entry_ltp = fill
-                            break
-            except Exception as e:
-                logger.warning(f"Could not fetch entry fill price: {e}")
+            order_status, fill_price, _row = self._confirm_order(order_id)
+            if order_status == "rejected":
+                msg = f"Buy order for {symbol} qty={qty} was accepted then REJECTED/CANCELLED by the exchange (order {order_id})."
+                logger.error(msg)
+                self.last_error = msg
+                _tg(f"🔴 <b>BUY ORDER REJECTED AFTER ACCEPTANCE</b>\n"
+                    f"Symbol : {symbol}\n"
+                    f"Qty    : {qty}\n"
+                    f"Order  : {order_id}\n"
+                    f"No position was opened — nothing to reconcile.\n"
+                    f"Time   : {_now().strftime('%H:%M:%S')}")
+                return False
+            if order_status == "complete" and fill_price:
+                entry_ltp = fill_price
+            elif order_status == "unknown":
+                _tg(f"⚠️ <b>ORDER STATUS UNCONFIRMED</b>\n"
+                    f"Buy order for {symbol} qty={qty} (order {order_id}) was accepted, "
+                    f"but the fill/reject status couldn't be confirmed in time. Proceeding "
+                    f"as if filled — please verify on the Angel One app and reconcile "
+                    f"manually if it wasn't.\n"
+                    f"Time   : {_now().strftime('%H:%M:%S')}")
             if is_test:
                 _mark_test_order(order_id)
 
@@ -1436,21 +1477,32 @@ class AngelTrader:
                     self.position["exiting"] = False
                 return
             sell_order_id = resp.get("data", {}).get("orderid")
-            # Use actual fill price from Angel One tradeBook, matched by exact order ID
-            # instead of symbol/side — the same strike can be bought/sold more than once
-            # in a day, and a plain symbol scan can silently grab an earlier trade's fill.
-            try:
-                import time as _time; _time.sleep(1)  # brief wait for fill to settle
-                tb = self._obj.tradeBook()
-                if tb and tb.get("status") and tb.get("data") and sell_order_id:
-                    for row in tb["data"]:
-                        if str(row.get("orderid")) == str(sell_order_id):
-                            fill = float(row.get("fillprice") or 0)
-                            if fill:
-                                ltp = fill
-                            break
-            except Exception as e:
-                logger.warning(f"Could not fetch fill price: {e}")
+            order_status, fill_price, _row = self._confirm_order(sell_order_id)
+            if order_status == "rejected":
+                self.last_error = f"Sell order for {pos['symbol']} was accepted then rejected/cancelled (order {sell_order_id})"
+                logger.error(self.last_error)
+                _tg(f"🔴 <b>EXIT REJECTED AFTER ACCEPTANCE — MANUAL ACTION NEEDED</b>\n"
+                    f"Symbol : {pos['symbol']}\n"
+                    f"Qty    : {pos['qty']}\n"
+                    f"Reason : {reason}\n"
+                    f"Order  : {sell_order_id}\n"
+                    f"The position is still OPEN at the broker — the bot will keep "
+                    f"managing it, but please check the Angel One app.\n"
+                    f"Time   : {_now().strftime('%H:%M:%S')}")
+                with self._lock:
+                    # Release the claim — the position is still genuinely open (sell
+                    # was rejected), so keep managing it instead of orphaning it as "closed".
+                    self.position["exiting"] = False
+                return
+            if order_status == "complete" and fill_price:
+                ltp = fill_price
+            elif order_status == "unknown":
+                _tg(f"⚠️ <b>EXIT STATUS UNCONFIRMED</b>\n"
+                    f"Sell order {sell_order_id} for {pos['symbol']} was accepted, but "
+                    f"fill/reject status couldn't be confirmed in time. Proceeding as "
+                    f"closed — please verify on the Angel One app and reconcile "
+                    f"manually if it wasn't actually filled.\n"
+                    f"Time   : {_now().strftime('%H:%M:%S')}")
             if pos.get("is_test"):
                 _mark_test_order(sell_order_id)
 
@@ -1613,18 +1665,23 @@ class AngelTrader:
                     logger.error(f"Manual add-lot buy failed: {resp}")
                     return False, f"Buy order failed: {msg}"
                 order_id = resp.get("data", {}).get("orderid", "—")
-                try:
-                    import time as _time; _time.sleep(1)
-                    tb = self._obj.tradeBook()
-                    if tb and tb.get("status") and tb.get("data") and order_id != "—":
-                        for row in tb["data"]:
-                            if str(row.get("orderid")) == str(order_id):
-                                f = float(row.get("fillprice") or 0)
-                                if f:
-                                    fill = f
-                                break
-                except Exception as e:
-                    logger.warning(f"Could not fetch add-lot fill price: {e}")
+                order_status, fill_price, _row = self._confirm_order(order_id)
+                if order_status == "rejected":
+                    logger.error(f"Manual add-lot order {order_id} was accepted then rejected/cancelled")
+                    _tg(f"🔴 <b>ADD-LOT REJECTED AFTER ACCEPTANCE</b>\n"
+                        f"Symbol : {pos['symbol']}\n"
+                        f"Order  : {order_id}\n"
+                        f"No lot was added — bot quantity is unchanged.\n"
+                        f"Time   : {_now().strftime('%H:%M:%S')}")
+                    return False, "Add-lot order was rejected/cancelled by the exchange — no lot added"
+                if order_status == "complete" and fill_price:
+                    fill = fill_price
+                elif order_status == "unknown":
+                    _tg(f"⚠️ <b>ADD-LOT STATUS UNCONFIRMED</b>\n"
+                        f"Order {order_id} for {pos['symbol']} was accepted, but fill/reject "
+                        f"status couldn't be confirmed in time. Proceeding as if filled — "
+                        f"please verify on the Angel One app.\n"
+                        f"Time   : {_now().strftime('%H:%M:%S')}")
 
             with self._lock:
                 if not self.position["active"]:
@@ -1698,18 +1755,23 @@ class AngelTrader:
                     logger.error(f"Manual sell-lot failed: {resp}")
                     return False, f"Sell order failed: {msg}"
                 sell_order_id = resp.get("data", {}).get("orderid")
-                try:
-                    import time as _time; _time.sleep(1)
-                    tb = self._obj.tradeBook()
-                    if tb and tb.get("status") and tb.get("data") and sell_order_id:
-                        for row in tb["data"]:
-                            if str(row.get("orderid")) == str(sell_order_id):
-                                f = float(row.get("fillprice") or 0)
-                                if f:
-                                    fill = f
-                                break
-                except Exception as e:
-                    logger.warning(f"Could not fetch sell-lot fill price: {e}")
+                order_status, fill_price, _row = self._confirm_order(sell_order_id)
+                if order_status == "rejected":
+                    logger.error(f"Manual sell-lot order {sell_order_id} was accepted then rejected/cancelled")
+                    _tg(f"🔴 <b>SELL-LOT REJECTED AFTER ACCEPTANCE</b>\n"
+                        f"Symbol : {pos['symbol']}\n"
+                        f"Order  : {sell_order_id}\n"
+                        f"No lot was sold — bot quantity is unchanged.\n"
+                        f"Time   : {_now().strftime('%H:%M:%S')}")
+                    return False, "Sell order was rejected/cancelled by the exchange — no lot sold"
+                if order_status == "complete" and fill_price:
+                    fill = fill_price
+                elif order_status == "unknown":
+                    _tg(f"⚠️ <b>SELL-LOT STATUS UNCONFIRMED</b>\n"
+                        f"Order {sell_order_id} for {pos['symbol']} was accepted, but fill/reject "
+                        f"status couldn't be confirmed in time. Proceeding as if filled — "
+                        f"please verify on the Angel One app.\n"
+                        f"Time   : {_now().strftime('%H:%M:%S')}")
 
             pnl     = round((fill - pos["entry_price"]) * reduce_qty, 2)
             pnl_pct = round((fill - pos["entry_price"]) / pos["entry_price"] * 100, 2) if pos["entry_price"] else 0
