@@ -1,7 +1,14 @@
 import json, os, threading, requests as _requests
 from flask import Flask, render_template_string, jsonify, request
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import backtest as bt
+
+# Cloud hosts (Vultr included) typically run system clocks in UTC — this
+# project's users and market hours are IST, so timestamps shown in the UI
+# must be converted explicitly rather than trusting datetime.now().
+_IST = timezone(timedelta(hours=5, minutes=30))
+def _now_ist():
+    return datetime.now(_IST).replace(tzinfo=None)
 
 def _tg(msg: str):
     token = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -128,7 +135,7 @@ def api_indices():
     try:
         return jsonify({"indices": get_trader().get_indices(),
                          "pcr": get_trader().get_nifty_pcr(),
-                         "time": datetime.now().strftime("%H:%M:%S")})
+                         "time": _now_ist().strftime("%H:%M:%S")})
     except Exception as e:
         return jsonify({"indices": [], "pcr": None, "error": str(e)})
 
@@ -136,7 +143,7 @@ def api_indices():
 def api_sector_indices():
     try:
         return jsonify({"indices": get_trader().get_sector_indices(),
-                         "time": datetime.now().strftime("%H:%M:%S")})
+                         "time": _now_ist().strftime("%H:%M:%S")})
     except Exception as e:
         return jsonify({"indices": [], "error": str(e)})
 
