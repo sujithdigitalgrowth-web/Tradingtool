@@ -1279,7 +1279,7 @@ class AngelTrader:
 
     # ── Entry ─────────────────────────────────────────────────────
 
-    def _enter(self, signal, force_strike=None, is_test=False):
+    def _enter(self, signal, force_strike=None, is_test=False, is_reversal=False):
         opt_type = "CE" if signal == "BUY_CE" else "PE"
         spot     = self.get_nifty_ltp()
         if not spot:
@@ -1413,6 +1413,7 @@ class AngelTrader:
                 "entry_price"  : round(entry_ltp, 2),
                 "entry_spot"   : round(spot, 2),
                 "entry_time"   : _now().strftime("%H:%M"),
+                "is_reversal"  : is_reversal,
                 "partial_done" : False,
                 "trail_on"     : False,
                 "trail_high"   : entry_ltp,
@@ -2045,8 +2046,18 @@ class AngelTrader:
             Chosen over the higher-EV "32%-only" version for the loss
             guarantee below 32% — backtested 45d (Aug 2026): Rs.43,905 vs
             Rs.33,562 doing nothing (Rs.51,905 for 32%-only, no guarantee);
-        (3) Supertrend flip against the position. EOD square-off is handled
-        by the shared check in _manage_position before this is called.
+        (3) Supertrend flip against the position;
+        (4) Still net negative 10 minutes after entry -> NEG_10MIN_EXIT, cut
+            and immediately flip into the opposite side at the same strike.
+            Backtested Aug19-Sep1 2026 (18 real trades, real option prices):
+            every trade still negative at +10min went on to lose (8/8 and
+            6/7 across two windows, never recovered) and the reversal --
+            managed by these same rules -- turned -Rs.11,482 into +Rs.6,825
+            on the subset that triggered it. Never chains a second reversal,
+            and skips the flip (still cuts, just no re-entry) within 30min of
+            square-off or once the day's trade/loss caps are already hit.
+        EOD square-off is handled by the shared check in _manage_position
+        before this is called.
         """
         tok  = pos["token"]
         tick = self._tick_ltp.get(tok)
@@ -2068,6 +2079,21 @@ class AngelTrader:
                       else current_spot - entry_spot)
             if adverse >= bt.ST6_SPOT_SL:
                 self._exit("ST_SPOT_SL", ltp)
+                return
+
+        entry_time_str = pos.get("entry_time")
+        if not pos.get("is_reversal") and ltp is not None and entry_time_str:
+            entry_dt = datetime.combine(_today(), datetime.strptime(entry_time_str, "%H:%M").time())
+            age_min  = (_now() - entry_dt).total_seconds() / 60
+            if age_min >= 10 and ltp < pos["entry_price"]:
+                reversal_signal = "BUY_PE" if pos["side"] == "CE" else "BUY_CE"
+                strike = pos["strike"]
+                self._exit("NEG_10MIN_EXIT", ltp)
+                too_late = _now().strftime("%H:%M") >= "14:45"
+                caps_hit = (self.trade_count >= self.max_trades or
+                           self.daily_pnl <= self.max_daily_loss)
+                if not too_late and not caps_hit:
+                    self._enter(reversal_signal, force_strike=strike, is_reversal=True)
                 return
 
         entry = pos["entry_price"]
@@ -2400,6 +2426,7 @@ def _empty_pos():
         "ema_warn_count"    : 0,     # consecutive CLOSED candles crossed back through EMA9
         "ema_last_candle_ts": None,  # candle timestamp last counted for ema_warn_count
         "st_last_candle_ts" : None,  # supertrend strategy: candle timestamp last checked
+        "is_reversal"       : False, # opened by NEG_10MIN_EXIT flipping to the opposite side
     }
 
 def _market_open(now: datetime) -> bool:
