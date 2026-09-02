@@ -333,7 +333,7 @@ def _load_test_order_ids():
 def api_trade_history():
     from_date = request.args.get("from", "")
     to_date   = request.args.get("to",   "")
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = _now_ist().strftime("%Y-%m-%d")
 
     records = []
     test_order_ids = _load_test_order_ids()
@@ -1064,7 +1064,10 @@ function renderIndices(indices){
 let calDate = new Date(); calDate.setDate(1);
 let calTradesByDate = {};
 
-function calFmt(d){ return d.toISOString().slice(0,10); }
+// Local-date formatting (not toISOString, which shifts by the UTC offset —
+// in IST, local midnight is 18:30 UTC the previous day, so toISOString()
+// would file a day's trades one cell earlier than the day they occurred).
+function calFmt(d){ return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
 
 function calShiftMonth(delta){
   calDate.setMonth(calDate.getMonth()+delta);
