@@ -1112,7 +1112,11 @@ function renderCalendar(){
         const ds = calFmt(cur);
         const inMonth   = cur.getMonth()===month;
         const dayTrades = (calTradesByDate[ds]||[]).filter(t=>t.pnl!=null);
-        let inner = `<p class="text-xs font-semibold ${inMonth?'text-gray-700':'text-gray-300'} mb-1.5">${cur.getDate()}</p>`;
+        // Overflow cells (previous/next month filling out the week grid) show
+        // their own month's abbreviation so e.g. "31" isn't mistaken for a
+        // day in the displayed month.
+        const dayLabel = inMonth ? cur.getDate() : `${monthNames[cur.getMonth()].slice(0,3)} ${cur.getDate()}`;
+        let inner = `<p class="text-xs font-semibold ${inMonth?'text-gray-700':'text-gray-300'} mb-1.5">${dayLabel}</p>`;
         let cellTone = 'bg-white border-gray-100';
 
         if(dayTrades.length){
