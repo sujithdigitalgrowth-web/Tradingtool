@@ -465,6 +465,14 @@ class AngelTrader:
         self.max_daily_loss       = bt.MAX_DAILY_LOSS        # e.g. -8000; block entries once breached
         self.daily_profit_target  = bt.DAILY_PROFIT_TARGET   # e.g. 6000; block entries once hit
         self.loss_cooldown_candles = bt.V2_LOSS_COOLDOWN_CANDLES  # 0 disables
+        self.manual_target_pct    = None   # e.g. 0.10 for +10% -- user-set option-price take-
+                                            # profit, checked alongside (not instead of) every
+                                            # strategy's own SL/trail/flip/reversal logic; None
+                                            # disables it. Settable live via /api/manual-target.
+        self.carry_overnight      = False  # skip EOD_SQUAREOFF and hold the position into the
+                                            # next trading day, UNLESS today is the contract's
+                                            # own expiry date (a dying weekly option can't be
+                                            # carried past its own expiry regardless of this flag).
 
         # Daily state
         self.position     = _empty_pos()
@@ -1429,7 +1437,14 @@ class AngelTrader:
                 "ema_warn_count"    : 0,     # consecutive CLOSED candles crossed back through EMA9
                 "ema_last_candle_ts": None,  # candle timestamp last counted, so polls within the
                                              # same closed candle don't re-increment ema_warn_count
-                "st_last_candle_ts" : None,  # supertrend strategy: candle timestamp last checked
+                "st_last_candle_ts" : self._st_ref.get("ts"),  # supertrend strategy: seed with
+                                             # the current candle's ts so the flip check only
+                                             # reacts to a candle that closes AFTER entry, not
+                                             # the stale pre-entry reading (was None, which made
+                                             # the very first poll treat any already-against
+                                             # supertrend value as a fresh flip -- instantly
+                                             # killing NEG_REVERSAL_EXIT reversals before the trend
+                                             # actually turned in their favor).
             }
             self.last_signal = "buy" if signal == "BUY_CE" else "sell"
 
@@ -1871,7 +1886,11 @@ class AngelTrader:
             return
 
         ts = _now().strftime("%H:%M")
-        if ts >= SQUAREOFF_TIME:
+        # carry_overnight skips the daily square-off so the position rolls into
+        # the next trading day -- EXCEPT on the contract's own expiry date,
+        # since a weekly option can't be carried past its own expiry.
+        expiry_today = pos.get("expiry") == _today().isoformat()
+        if ts >= SQUAREOFF_TIME and (not self.carry_overnight or expiry_today):
             self._exit("EOD_SQUAREOFF")
             return
 
@@ -1895,6 +1914,12 @@ class AngelTrader:
         with self._lock:
             self.position["live_ltp"] = round(ltp, 2)
             self.position["live_pnl"] = round(pnl_pu * pos["qty"], 2)
+
+        # User-set manual target — checked alongside every other exit rule
+        # below, not instead of them; whichever condition hits first wins.
+        if self.manual_target_pct and opt_pct >= self.manual_target_pct:
+            self._exit("MANUAL_TARGET", ltp)
+            return
 
         is_one_lot  = pos.get("initial_qty", pos["qty"]) == bt.LOT_SIZE
         entry_time  = pos.get("entry_time", "00:00") or "00:00"
@@ -2047,15 +2072,20 @@ class AngelTrader:
             guarantee below 32% — backtested 45d (Aug 2026): Rs.43,905 vs
             Rs.33,562 doing nothing (Rs.51,905 for 32%-only, no guarantee);
         (3) Supertrend flip against the position;
-        (4) Still net negative 10 minutes after entry -> NEG_10MIN_EXIT, cut
-            and immediately flip into the opposite side at the same strike.
-            Backtested Aug19-Sep1 2026 (18 real trades, real option prices):
-            every trade still negative at +10min went on to lose (8/8 and
-            6/7 across two windows, never recovered) and the reversal --
-            managed by these same rules -- turned -Rs.11,482 into +Rs.6,825
-            on the subset that triggered it. Never chains a second reversal,
-            and skips the flip (still cuts, just no re-entry) within 30min of
-            square-off or once the day's trade/loss caps are already hit.
+        (4) Still down at least ST6_NEG_REVERSAL_LOSS_PCT, ST6_NEG_REVERSAL_AGE_MIN
+            minutes after entry -> NEG_REVERSAL_EXIT, cut and immediately flip
+            into the opposite side at the same strike.
+            Original 10min/any-negative rule backtested Aug19-Sep1 2026 (18 real
+            trades, real option prices): every trade still negative at +10min
+            went on to lose (8/8 and 6/7 across two windows, never recovered)
+            and the reversal -- managed by these same rules -- turned
+            -Rs.11,482 into +Rs.6,825 on the subset that triggered it.
+            45d grid search (Sep 2026) across age x loss-pct settled on
+            20min/5%: matches 10min/5%'s net P&L (Rs.54,101 vs Rs.55,059) while
+            roughly halving max drawdown (Rs.-6,357 vs Rs.-11,294) -- see
+            ST6_NEG_REVERSAL_AGE_MIN in backtest.py. Never chains a second
+            reversal, and skips the flip (still cuts, just no re-entry) within
+            30min of square-off or once the day's trade/loss caps are already hit.
         EOD square-off is handled by the shared check in _manage_position
         before this is called.
         """
@@ -2072,6 +2102,13 @@ class AngelTrader:
                 if ltp > pos["trail_high"]:
                     self.position["trail_high"] = ltp
 
+            # User-set manual target — checked alongside every other exit rule
+            # below, not instead of them; whichever condition hits first wins.
+            if (self.manual_target_pct and pos["entry_price"] > 0 and
+                    (ltp - pos["entry_price"]) / pos["entry_price"] >= self.manual_target_pct):
+                self._exit("MANUAL_TARGET", ltp)
+                return
+
         current_spot = self.get_nifty_ltp()
         entry_spot   = pos.get("entry_spot", 0.0)
         if current_spot and entry_spot:
@@ -2085,10 +2122,11 @@ class AngelTrader:
         if not pos.get("is_reversal") and ltp is not None and entry_time_str:
             entry_dt = datetime.combine(_today(), datetime.strptime(entry_time_str, "%H:%M").time())
             age_min  = (_now() - entry_dt).total_seconds() / 60
-            if age_min >= 10 and ltp < pos["entry_price"]:
+            if (age_min >= bt.ST6_NEG_REVERSAL_AGE_MIN and
+                    ltp <= pos["entry_price"] * (1 - bt.ST6_NEG_REVERSAL_LOSS_PCT)):
                 reversal_signal = "BUY_PE" if pos["side"] == "CE" else "BUY_CE"
                 strike = pos["strike"]
-                self._exit("NEG_10MIN_EXIT", ltp)
+                self._exit("NEG_REVERSAL_EXIT", ltp)
                 too_late = _now().strftime("%H:%M") >= "14:45"
                 caps_hit = (self.trade_count >= self.max_trades or
                            self.daily_pnl <= self.max_daily_loss)
@@ -2116,8 +2154,17 @@ class AngelTrader:
         if st_ts is not None and st_ts != pos.get("st_last_candle_ts"):
             with self._lock:
                 self.position["st_last_candle_ts"] = st_ts
-            st_val = self._st_ref.get("value")
-            flip_against = ((pos["side"] == "CE" and st_val == -1) or
+            st_val, st_prev = self._st_ref.get("value"), self._st_ref.get("prev")
+            # Require an ACTUAL flip on this candle (value != prev), matching
+            # neg10min_45day_backtest.py's st_prev/st_now transition check --
+            # not just "current reading happens to be against me". A reversal
+            # is entered deliberately against the still-prevailing Supertrend
+            # direction (that's the whole premise: price already moved, the
+            # indicator hasn't caught up yet), so checking raw current value
+            # alone would treat that pre-existing, unchanged reading as a
+            # fresh flip and kill the reversal before the trend ever turns.
+            flipped = st_val is not None and st_prev is not None and st_val != st_prev
+            flip_against = flipped and ((pos["side"] == "CE" and st_val == -1) or
                             (pos["side"] == "PE" and st_val == 1))
             if flip_against:
                 self._exit("ST_FLIP", ltp)
@@ -2255,7 +2302,8 @@ class AngelTrader:
 
     def start(self, max_trades: int = 2, lots: int = 1, paper_mode: bool = False,
              max_daily_loss: float = None, daily_profit_target: float = None,
-             strategy: str = "v2"):
+             strategy: str = "v2", manual_target_pct: float = None,
+             carry_overnight: bool = False):
         """Enable trading and launch background threads."""
         if self._obj is None:
             self.login()
@@ -2267,6 +2315,8 @@ class AngelTrader:
         self.max_daily_loss   = max_daily_loss if max_daily_loss is not None else bt.MAX_DAILY_LOSS
         self.daily_profit_target = (daily_profit_target if daily_profit_target is not None
                                     else bt.DAILY_PROFIT_TARGET)
+        self.manual_target_pct = manual_target_pct
+        self.carry_overnight   = carry_overnight
         # Supertrend uses its own global (either-direction) cooldown constant;
         # V2 uses its validated same-direction-only cooldown.
         self.loss_cooldown_candles = (bt.ST6_LOSS_COOLDOWN_CANDLES if self.strategy == "supertrend"
@@ -2381,7 +2431,11 @@ class AngelTrader:
     def _reset_day(self):
         with self._lock:
             self._today      = _today()
-            self.position    = _empty_pos()
+            # A carry_overnight position surviving into today must NOT be
+            # wiped here -- it's still genuinely open at the broker. Only
+            # reset the position slot when nothing real is holding it.
+            if not self.position.get("active"):
+                self.position = _empty_pos()
             self.trades      = []
             self.daily_pnl   = 0.0
             self.win_count   = 0
@@ -2426,7 +2480,7 @@ def _empty_pos():
         "ema_warn_count"    : 0,     # consecutive CLOSED candles crossed back through EMA9
         "ema_last_candle_ts": None,  # candle timestamp last counted for ema_warn_count
         "st_last_candle_ts" : None,  # supertrend strategy: candle timestamp last checked
-        "is_reversal"       : False, # opened by NEG_10MIN_EXIT flipping to the opposite side
+        "is_reversal"       : False, # opened by NEG_REVERSAL_EXIT flipping to the opposite side
     }
 
 def _market_open(now: datetime) -> bool:

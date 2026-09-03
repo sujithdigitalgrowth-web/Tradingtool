@@ -69,6 +69,16 @@ ST6_TRAIL_GIVEBACK     = 0.03  # once past ST6_TRAIL_LOCK_TRIGGER, exit if price
                                  # and consistently LOST money vs no partial --
                                  # letting the full qty run is what captures the
                                  # big trending days.
+ST6_NEG_REVERSAL_AGE_MIN  = 20  # NEG_REVERSAL_EXIT only fires once a position has been
+                                 # open this many minutes -- 45d grid search (Sep 2026)
+                                 # showed 20min/5% matches 10min/5%'s P&L (Rs.54,101 vs
+                                 # Rs.55,059) while roughly halving max drawdown
+                                 # (Rs.-6,357 vs Rs.-11,294); 15min and 30min both
+                                 # underperformed at every loss threshold tested.
+ST6_NEG_REVERSAL_LOSS_PCT = 0.05  # ...and only if still down at least this much (option
+                                 # %) at that mark -- a trade merely flat/marginally
+                                 # negative isn't the "never recovers" pattern the
+                                 # backtest validated; require a real loss.
 ST6_LOSS_COOLDOWN_CANDLES = 3  # after ANY losing exit, block new entries in EITHER
                                  # direction for this many closed candles (0 disables).
                                  # Unlike V2_LOSS_COOLDOWN_CANDLES (same-direction only),
