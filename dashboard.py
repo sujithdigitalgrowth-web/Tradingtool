@@ -59,9 +59,13 @@ def _init_trader():
             max_daily_loss      = float(cfg.get("max_daily_loss", bt.MAX_DAILY_LOSS))
             daily_profit_target = float(cfg.get("daily_profit_target", bt.DAILY_PROFIT_TARGET))
             strategy            = cfg.get("strategy", "v2")
+            manual_target_pct   = cfg.get("manual_target_pct")
+            carry_overnight     = bool(cfg.get("carry_overnight", False))
             t.start(max_trades=max_trades, lots=lots, paper_mode=paper,
                    max_daily_loss=max_daily_loss, daily_profit_target=daily_profit_target,
-                   strategy=strategy)
+                   strategy=strategy,
+                   manual_target_pct=(float(manual_target_pct) / 100.0 if manual_target_pct else None),
+                   carry_overnight=carry_overnight)
             from logzero import logger
             logger.info(f"Auto-resumed trading: strategy={strategy}, {lots} lot(s), "
                        f"max {max_trades} trades, paper={paper}")
@@ -97,6 +101,7 @@ def load_json(path):
 
 def _get_trading_config():
     cfg = load_json(TRADING_CONFIG_FILE)
+    manual_target_pct = cfg.get("manual_target_pct")
     return {
         "max_trades":          int(cfg.get("max_trades", 2)),
         "lots":                int(cfg.get("lots", 1)),
@@ -105,6 +110,8 @@ def _get_trading_config():
         "max_daily_loss":      float(cfg.get("max_daily_loss", bt.MAX_DAILY_LOSS)),
         "daily_profit_target": float(cfg.get("daily_profit_target", bt.DAILY_PROFIT_TARGET)),
         "strategy":            cfg.get("strategy", "v2"),
+        "manual_target_pct":   float(manual_target_pct) if manual_target_pct is not None else None,
+        "carry_overnight":     bool(cfg.get("carry_overnight", False)),
     }
 
 def _save_trading_config(cfg):
@@ -162,6 +169,23 @@ def api_live_state():
 
 # ── API: Trading control ──────────────────────────────────────────
 
+def _parse_manual_target_pct(body, key="manual_target_pct"):
+    """Manual take-profit %, given/stored as a plain percent number (10 = 10%),
+    converted to the 0-1 fraction live_trader.py's checks expect. None/0/""
+    disables it. Clamped to (0, 100] to reject nonsense input."""
+    if key not in body:
+        return "unset"   # sentinel: caller should keep the existing value
+    raw = body.get(key)
+    if raw in (None, "", 0, "0"):
+        return None
+    try:
+        pct = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if pct <= 0:
+        return None
+    return round(min(100.0, pct), 2)
+
 @app.route("/api/start-trading", methods=["POST"])
 def api_start_trading():
     body                = request.json or {}
@@ -173,17 +197,25 @@ def api_start_trading():
     strategy            = body.get("strategy", "v2")
     if strategy not in ("v2", "supertrend"):
         strategy = "v2"
+    manual_target_pct = _parse_manual_target_pct(body)
+    if manual_target_pct == "unset":
+        manual_target_pct = None
+    carry_overnight = bool(body.get("carry_overnight", False))
     try:
         t = get_trader()
         t.start(max_trades=max_trades, lots=lots, paper_mode=paper,
                max_daily_loss=max_daily_loss, daily_profit_target=daily_profit_target,
-               strategy=strategy)
+               strategy=strategy,
+               manual_target_pct=(manual_target_pct / 100.0 if manual_target_pct else None),
+               carry_overnight=carry_overnight)
         _save_trading_config({"max_trades": max_trades, "lots": lots, "paper": paper, "active": True,
                               "max_daily_loss": max_daily_loss, "daily_profit_target": daily_profit_target,
-                              "strategy": strategy})
+                              "strategy": strategy, "manual_target_pct": manual_target_pct,
+                              "carry_overnight": carry_overnight})
         return jsonify({"status": "started", "max_trades": max_trades, "lots": lots, "paper": paper,
                         "max_daily_loss": max_daily_loss, "daily_profit_target": daily_profit_target,
-                        "strategy": strategy})
+                        "strategy": strategy, "manual_target_pct": manual_target_pct,
+                        "carry_overnight": carry_overnight})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -307,12 +339,51 @@ def api_set_config():
     existing            = _get_trading_config()
     max_daily_loss      = min(-500, max(-50000, float(body.get("max_daily_loss", existing["max_daily_loss"]))))
     daily_profit_target = max(500, min(50000, float(body.get("daily_profit_target", existing["daily_profit_target"]))))
+    manual_target_pct   = _parse_manual_target_pct(body)
+    if manual_target_pct == "unset":
+        manual_target_pct = existing.get("manual_target_pct")
+    carry_overnight     = bool(body.get("carry_overnight", existing.get("carry_overnight", False)))
     cfg = {"max_trades": max_trades, "lots": lots,
            "paper": existing.get("paper", True), "active": existing.get("active", False),
            "max_daily_loss": max_daily_loss, "daily_profit_target": daily_profit_target,
-           "strategy": existing.get("strategy", "v2")}
+           "strategy": existing.get("strategy", "v2"),
+           "manual_target_pct": manual_target_pct, "carry_overnight": carry_overnight}
     _save_trading_config(cfg)
     return jsonify(cfg)
+
+@app.route("/api/manual-target", methods=["POST"])
+def api_set_manual_target():
+    """Apply a take-profit % (or clear it) to the currently RUNNING trader
+    immediately, without needing to stop/restart trading. Persists too, so it
+    survives a server restart's auto-resume."""
+    body = request.json or {}
+    pct = _parse_manual_target_pct(body, key="pct")
+    if pct == "unset":
+        return jsonify({"error": "Missing 'pct' (a percent number, or null/0 to disable)"}), 400
+    try:
+        t = get_trader()
+        t.manual_target_pct = (pct / 100.0) if pct else None
+        cfg = _get_trading_config()
+        cfg["manual_target_pct"] = pct
+        _save_trading_config(cfg)
+        return jsonify({"status": "ok", "manual_target_pct": pct})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/carry-overnight", methods=["POST"])
+def api_set_carry_overnight():
+    """Toggle carry_overnight on the currently RUNNING trader immediately."""
+    body    = request.json or {}
+    enabled = bool(body.get("enabled", False))
+    try:
+        t = get_trader()
+        t.carry_overnight = enabled
+        cfg = _get_trading_config()
+        cfg["carry_overnight"] = enabled
+        _save_trading_config(cfg)
+        return jsonify({"status": "ok", "carry_overnight": enabled})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # ── API: Trade History ───────────────────────────────────────────
 
@@ -886,6 +957,27 @@ TEMPLATE = r"""
             </span>
           </label>
         </div>
+      </div>
+      <div>
+        <label class="text-sm font-semibold text-gray-700 block mb-1">Manual Target %</label>
+        <div class="flex items-center gap-3">
+          <select id="m-manual-target" class="border border-gray-300 rounded px-3 py-2 text-sm text-gray-800">
+            <option value="0">Off — hardcoded exit logic only</option>
+            <option value="5">5%</option>
+            <option value="10">10%</option>
+            <option value="15">15%</option>
+            <option value="20">20%</option>
+          </select>
+          <span class="text-xs text-gray-400">Extra take-profit, alongside SL/trail/flip — whichever hits first wins</span>
+        </div>
+      </div>
+      <div>
+        <label class="flex items-center gap-2 cursor-pointer">
+          <input type="checkbox" id="m-carry-overnight" class="accent-purple-600"/>
+          <span class="text-sm font-semibold text-gray-700">Carry position overnight</span>
+        </label>
+        <p class="text-xs text-gray-400 mt-1 ml-6">Skip end-of-day square-off and hold into the next trading day
+          (still force-closes on the contract's own expiry date). Off by default.</p>
       </div>
       <div>
         <label class="text-sm font-semibold text-gray-700 block mb-2">Mode</label>
@@ -1634,6 +1726,8 @@ function openStartModal(){
     const isSupertrend = cfg.strategy === 'supertrend';
     document.getElementById('m-strategy-v2')        .checked = !isSupertrend;
     document.getElementById('m-strategy-supertrend').checked = isSupertrend;
+    document.getElementById('m-manual-target').value = cfg.manual_target_pct ? String(cfg.manual_target_pct) : '0';
+    document.getElementById('m-carry-overnight').checked = !!cfg.carry_overnight;
     updateModalUnits();
     updateModeWarning();
   }).catch(()=>{});
@@ -1665,11 +1759,13 @@ function confirmStart(){
   const lots      =parseInt(document.getElementById('m-lots').value);
   const paper     =document.getElementById('m-mode-paper').checked;
   const strategy  =document.getElementById('m-strategy-supertrend').checked ? 'supertrend' : 'v2';
+  const manual_target_pct = parseFloat(document.getElementById('m-manual-target').value) || 0;
+  const carry_overnight   = document.getElementById('m-carry-overnight').checked;
   closeModal();
   fetch('/api/start-trading',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({max_trades,lots,paper,strategy})
+    body:JSON.stringify({max_trades,lots,paper,strategy,manual_target_pct,carry_overnight})
   }).then(r=>r.json()).then(d=>{
     if(d.error) alert('Error: '+d.error);
     else setTimeout(refreshLive,1000);
