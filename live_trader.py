@@ -1453,10 +1453,13 @@ class AngelTrader:
                 entry = self._idx_cache.get(s.get("token"), {})
                 ltp, close, ts = entry.get("ltp"), entry.get("close"), entry.get("ts")
                 pct_change = round((ltp - close) / close * 100, 2) if ltp is not None and close else None
+                week52_high = entry.get("week52_high")
+                off_52w_high = round((ltp - week52_high) / week52_high * 100, 2) if ltp is not None and week52_high else None
                 rows.append({
                     "id": s["id"], "symbol": s["symbol"],
                     "ltp": round(ltp, 2) if ltp is not None else None,
                     "pct_change": pct_change,
+                    "off_52w_high_pct": off_52w_high,
                     "live": bool(ts and (now - ts) < 25),
                     "fundamentals": s.get("fundamentals"),
                 })
@@ -1513,6 +1516,49 @@ class AngelTrader:
     # candidates) into a short list of rule-based hints. Not investment
     # advice — every card traces back to a number already on the dashboard.
 
+    @staticmethod
+    def _score_dip_candidate(pct_change, off_52w_high_pct, fundamentals):
+        """Heuristic "beaten-down but not broken" score for a short-term
+        (weeks-to-a-month) mean-reversion candidate: weak today and/or
+        trading well below its 52-week high, ideally with fundamentals
+        (from a watchlist snapshot) that argue the weakness is sentiment
+        rather than the business falling apart. Returns None if the stock
+        doesn't show enough weakness to qualify at all. This is a rule-based
+        screen, not a return forecast."""
+        if pct_change is None:
+            return None
+        discount = off_52w_high_pct if off_52w_high_pct is not None else 0.0
+        if pct_change > -0.5 and discount > -10:
+            return None   # not actually down today, and not off its highs either
+
+        score = max(0.0, -pct_change) + max(0.0, -discount) * 0.3
+        reasons = []
+        if pct_change < 0:
+            reasons.append(f"down {abs(pct_change):.1f}% today")
+        if discount <= -10:
+            reasons.append(f"{abs(discount):.0f}% off its 52-week high")
+
+        if fundamentals:
+            pg = fundamentals.get("profit_growth_3y")
+            pe = fundamentals.get("pe")
+            if pg is not None:
+                if pg >= 15:
+                    reasons.append(f"{pg:.0f}% 3Y profit growth")
+                    score += 5
+                elif pg < 0:
+                    reasons.append("but profit has actually shrunk over 3Y")
+                    score -= 8
+            if pe is not None and pe > 0:
+                if pe < 30:
+                    score += 3
+                elif pe > 100:
+                    reasons.append(f"P/E {pe:.0f} is rich for this")
+                    score -= 5
+
+        if not reasons:
+            return None
+        return score, reasons
+
     def get_recommendations(self):
         try:
             hw = self.get_heavyweights()
@@ -1531,13 +1577,18 @@ class AngelTrader:
                           "title": f"Market: {hw.get('signal', 'SIDEWAYS / NO TREND')}",
                           "text": f"{hw.get('reason', '')}. {market_note}"})
 
-            for h in pf.get("holdings", []):
+            holdings = pf.get("holdings", [])
+            deep_loss_symbols = set()
+            for h in holdings:
                 if h["signal"] != "HOLD":
                     cards.append({"type": "holding", "tone": h["tone"],
                                   "title": f"{h['symbol']}: {h['signal']}", "text": h["note"]})
+                if h["signal"] == "REVIEW — DEEP LOSS":
+                    deep_loss_symbols.add(h["symbol"])
 
             cash = pf.get("totals", {}).get("cash") or 0.0
             wl_stocks = wl.get("stocks", [])
+
             if cash < 1:
                 cards.append({"type": "cash", "tone": "flat", "title": "No funds tracked",
                               "text": "Set your available funds on the Portfolio tab so I can suggest where to deploy them."})
@@ -1546,25 +1597,47 @@ class AngelTrader:
                               "text": f"{hw.get('signal')} on the index right now. Holding cash rather than "
                                       f"buying into broad weakness is a reasonable call."})
             else:
-                dippers = sorted([s for s in wl_stocks if s.get("pct_change") is not None and s["pct_change"] < 0],
-                                  key=lambda s: s["pct_change"])
-                if not dippers:
+                # Pool watchlist stocks (have fundamentals) and portfolio
+                # holdings not already flagged as a deep loss (topping up a
+                # falling knife isn't a "dip-buy" — it's covered by the
+                # REVIEW — DEEP LOSS card above instead) into one candidate
+                # list, scored the same way.
+                pool = [{"symbol": s["symbol"], "ltp": s.get("ltp"), "pct_change": s.get("pct_change"),
+                         "off52": s.get("off_52w_high_pct"), "fundamentals": s.get("fundamentals"), "held": False}
+                        for s in wl_stocks]
+                pool += [{"symbol": h["symbol"], "ltp": h.get("ltp"), "pct_change": h.get("day_change_pct"),
+                          "off52": h.get("off_52w_high_pct"), "fundamentals": None, "held": True}
+                         for h in holdings if h["symbol"] not in deep_loss_symbols]
+
+                scored = []
+                for c in pool:
+                    result = self._score_dip_candidate(c["pct_change"], c["off52"], c["fundamentals"])
+                    if result:
+                        scored.append((result[0], result[1], c))
+                scored.sort(key=lambda x: -x[0])
+
+                if not scored:
                     cards.append({"type": "cash", "tone": "flat", "title": f"₹{cash:,.0f} in cash",
-                                  "text": "Nothing on your watchlist is pulling back today — add candidates there "
-                                          "so I can flag dips worth a look."})
+                                  "text": "Nothing in your watchlist or portfolio looks meaningfully beaten-down "
+                                          "right now — add more watchlist names, or check back after a pullback."})
                 else:
-                    best = dippers[0]
-                    afford = int(cash // best["ltp"]) if best.get("ltp") else 0
-                    if afford > 0:
-                        cards.append({"type": "cash", "tone": "bullish",
-                                      "title": f"₹{cash:,.0f} available — {best['symbol']} is down {best['pct_change']:.2f}% today",
-                                      "text": f"On your watchlist and pulling back while the index is "
-                                              f"{hw.get('signal','').lower()}. At ₹{best['ltp']:.2f}/share you "
-                                              f"could buy up to {afford} share(s) with your available funds."})
-                    else:
-                        cards.append({"type": "cash", "tone": "flat", "title": f"₹{cash:,.0f} in cash",
-                                      "text": f"{best['symbol']} is down {best['pct_change']:.2f}% today but even "
-                                              f"1 share (₹{best['ltp']:.2f}) exceeds your available funds."})
+                    for score, reasons, c in scored[:3]:
+                        if not c.get("ltp"):
+                            continue
+                        afford = int(cash // c["ltp"])
+                        action = "Add to your existing position" if c["held"] else "New buy candidate"
+                        if afford > 0:
+                            cards.append({"type": "cash", "tone": "bullish",
+                                          "title": f"{c['symbol']} — {action.lower()}",
+                                          "text": f"{', '.join(reasons)}. At ₹{c['ltp']:.2f}/share you could buy "
+                                                  f"up to {afford} share(s) with your ₹{cash:,.0f} available funds. "
+                                                  f"({action}.) Heuristic screen for a short-term bounce, not a "
+                                                  f"forecast — check the story before buying."})
+                        else:
+                            cards.append({"type": "cash", "tone": "flat",
+                                          "title": f"{c['symbol']} looks like a dip but funds are short",
+                                          "text": f"{', '.join(reasons)}, but even 1 share (₹{c['ltp']:.2f}) "
+                                                  f"exceeds your ₹{cash:,.0f} available funds."})
 
             return {"cards": cards, "time": _now().strftime("%H:%M:%S")}
         except Exception as e:
