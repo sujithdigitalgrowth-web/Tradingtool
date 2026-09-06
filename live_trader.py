@@ -3,7 +3,7 @@ live_trader.py — Angel One Smart API live trading engine
 Strategy : V2 (VWAP + EMA9/20 + RSI + Volume + BNF + Supertrend + VIX)
 Lot size  : 65 (NSE, effective Oct 28 2025)
 """
-import os, json, time, threading, requests, struct, ssl, re
+import os, json, time, threading, requests, struct, ssl, re, uuid
 from collections import deque
 import websocket
 import pandas as pd, numpy as np
@@ -72,6 +72,12 @@ SCRIP_CACHE       = "logs/scrip_nfo.json"
 LIVE_STATE_FILE   = "logs/live_state.json"
 TRADE_LOG_FILE    = "logs/trade_history.json"
 TEST_ORDER_ID_FILE = "logs/test_order_ids.json"
+PORTFOLIO_FILE          = "logs/portfolio.json"
+PORTFOLIO_TXN_FILE      = "logs/portfolio_transactions.json"
+WATCHLIST_FILE          = "logs/watchlist.json"
+NSE_INSTRUMENT_CACHE    = "logs/nse_eq_instruments.json"
+NSE_INSTRUMENT_CACHE_TTL_DAYS = 7
+INSTRUMENT_MASTER_URL   = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
 
 # ── India VIX — shown beside NIFTY 50 in the dashboard header ──────
 # (exchange, Angel One symbol token, display name, subtitle)
@@ -160,6 +166,55 @@ SECTOR_INDICES = [
     ]),
 ]
 
+# ── Heavyweights tab: full Nifty 50 weighted constituent set, real-time.
+# ~49 tokens, one batched quote call (chunked at 40/req) — still light
+# enough to poll on the same cadence as the header VIX feed without
+# competing with the bot's own signal-loop candle fetches.
+#
+# (symbol, NSE-EQ token, Nifty 50 index weight %) — weights are a manually
+# refreshed snapshot (source: smart-investing.in, cross-checked against a
+# second aggregator, both dated 2026-09-04) since Angel's API has no live
+# index-weights endpoint. These 49 named constituents summed to 100.00% of
+# index weight in that snapshot; NSE reviews/rebalances Nifty 50 membership
+# semi-annually (March/September) — revisit this list after each rebalance.
+NIFTY50_CONSTITUENTS = [
+    ("RELIANCE",   "2885",  9.35), ("BHARTIARTL", "10604", 6.01),
+    ("HDFCBANK",   "1333",  5.74), ("ICICIBANK",  "4963",  5.34),
+    ("SBIN",       "3045",  4.91), ("TCS",        "11536", 4.35),
+    ("BAJFINANCE", "317",   3.45), ("LT",         "11483", 2.85),
+    ("HINDUNILVR", "1394",  2.42), ("INFY",       "1594",  2.40),
+    ("SUNPHARMA",  "3351",  2.38), ("TITAN",      "3506",  2.32),
+    ("KOTAKBANK",  "1922",  2.21), ("MARUTI",     "10999", 2.09),
+    ("ADANIENT",   "25",    2.08), ("AXISBANK",   "5900",  2.07),
+    ("M&M",        "2031",  2.06), ("ADANIPORTS", "15083", 2.06),
+    ("HCLTECH",    "7229",  1.84), ("ULTRACEMCO", "11532", 1.75),
+    ("ITC",        "1660",  1.73), ("BAJAJ-AUTO", "16669", 1.71),
+    ("JSWSTEEL",   "11723", 1.69), ("NTPC",       "11630", 1.69),
+    ("BAJAJFINSV", "16675", 1.65), ("ETERNAL",    "5097",  1.63),
+    ("BEL",        "383",   1.55), ("ONGC",       "2475",  1.54),
+    ("COALINDIA",  "20374", 1.33), ("POWERGRID",  "14977", 1.29),
+    ("SHRIRAMFIN", "4306",  1.28), ("ASIANPAINT", "236",   1.27),
+    ("TATASTEEL",  "3499",  1.23), ("HINDALCO",   "1363",  1.19),
+    ("GRASIM",     "1232",  1.18), ("EICHERMOT",  "910",   1.09),
+    ("INDIGO",     "11195", 1.01), ("SBILIFE",    "21808", 0.93),
+    ("WIPRO",      "3787",  0.92), ("JIOFIN",     "18143", 0.83),
+    ("TECHM",      "13538", 0.82), ("TRENT",      "1964",  0.79),
+    ("APOLLOHOSP", "157",   0.65), ("HDFCLIFE",   "467",   0.62),
+    ("TMPV",       "3456",  0.60), ("CIPLA",      "694",   0.58),
+    ("TATACONSUM", "3432",  0.52), ("DRREDDY",    "881",   0.50),
+    ("MAXHEALTH",  "22377", 0.50),
+]
+NIFTY50_INDEX_TOKEN      = "99926000"   # real NIFTY 50 spot index (NSE), for comparison vs the weighted basket
+HW_VOL_SPIKE_MULT        = 1.2          # ">1.2x 20-day average" volume threshold
+HW_AVG_VOL_LOOKBACK_DAYS = 20
+# 4/5 and 3/5 breadth thresholds generalized to weighted-%-of-index terms
+HW_BULLISH_WEIGHT_PCT = 80.0
+HW_BEARISH_WEIGHT_PCT = 60.0
+
+# ── My Portfolio tab: rule-based profit-booking / re-entry thresholds ──
+PORTFOLIO_TAKE_PROFIT_DAY_PCT = 4.0     # single-day pop this big -> consider trimming
+PORTFOLIO_STOPLOSS_PCT        = -10.0   # overall loss this deep -> flag for review
+
 
 def _append_trade_log(record: dict):
     """Append a completed trade record to the persistent trade history file."""
@@ -197,6 +252,114 @@ def _mark_test_order(order_id):
         os.replace(tmp, TEST_ORDER_ID_FILE)
     except Exception as e:
         logger.warning(f"test_order_id log error: {e}")
+
+
+# ── My Portfolio tab: manually-tracked holdings + cash, persisted to disk ──
+# State shape: {"cash": float, "holdings": [{id, symbol, token, qty, buy_price, buy_date}, ...]}
+
+def _load_portfolio_state() -> dict:
+    if os.path.exists(PORTFOLIO_FILE):
+        try:
+            with open(PORTFOLIO_FILE) as f:
+                data = json.load(f)
+            if isinstance(data, list):   # pre-cash-tracking format: a bare holdings list
+                return {"cash": 0.0, "holdings": data}
+            data.setdefault("cash", 0.0)
+            data.setdefault("holdings", [])
+            return data
+        except Exception as e:
+            logger.warning(f"portfolio load error: {e}")
+    return {"cash": 0.0, "holdings": []}
+
+
+def _save_portfolio_state(state: dict):
+    os.makedirs("logs", exist_ok=True)
+    tmp = PORTFOLIO_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=2)
+    os.replace(tmp, PORTFOLIO_FILE)
+
+
+def _append_portfolio_transaction(record: dict):
+    """Buy/sell audit trail — also lets recommendations reference recent activity."""
+    os.makedirs("logs", exist_ok=True)
+    txns = []
+    if os.path.exists(PORTFOLIO_TXN_FILE):
+        try:
+            with open(PORTFOLIO_TXN_FILE) as f:
+                txns = json.load(f)
+        except Exception as e:
+            logger.warning(f"portfolio txn load error: {e}")
+    txns.append(record)
+    tmp = PORTFOLIO_TXN_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(txns, f, indent=2, default=str)
+    os.replace(tmp, PORTFOLIO_TXN_FILE)
+
+
+# ── Watchlist (left rail on the Portfolio tab): price tracking only,
+# no quantity/buy-price — just symbols the user wants to keep an eye on ──
+
+def _load_watchlist() -> list:
+    if os.path.exists(WATCHLIST_FILE):
+        try:
+            with open(WATCHLIST_FILE) as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"watchlist load error: {e}")
+    return []
+
+
+def _save_watchlist(stocks: list):
+    os.makedirs("logs", exist_ok=True)
+    tmp = WATCHLIST_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(stocks, f, indent=2)
+    os.replace(tmp, WATCHLIST_FILE)
+
+
+_nse_instrument_cache = None   # in-memory: {SYMBOL -> token}, lazy-loaded from disk/network
+
+
+def _load_nse_instrument_cache() -> dict:
+    """SYMBOL -> NSE-EQ token, for resolving manually-typed portfolio symbols.
+    Cached to disk for NSE_INSTRUMENT_CACHE_TTL_DAYS since Angel's full
+    instrument master is a ~15MB/140k-row download."""
+    global _nse_instrument_cache
+    if _nse_instrument_cache is not None:
+        return _nse_instrument_cache
+
+    if os.path.exists(NSE_INSTRUMENT_CACHE):
+        age_days = (time.time() - os.path.getmtime(NSE_INSTRUMENT_CACHE)) / 86400
+        if age_days < NSE_INSTRUMENT_CACHE_TTL_DAYS:
+            try:
+                with open(NSE_INSTRUMENT_CACHE) as f:
+                    _nse_instrument_cache = json.load(f)
+                    return _nse_instrument_cache
+            except Exception as e:
+                logger.warning(f"NSE instrument cache read error: {e}")
+
+    logger.info("Downloading Angel One instrument master for symbol resolution...")
+    resp = requests.get(INSTRUMENT_MASTER_URL, timeout=60)
+    data = resp.json()
+    mapping = {
+        inst["name"].upper(): inst["token"]
+        for inst in data
+        if inst.get("exch_seg") == "NSE" and inst.get("symbol", "").endswith(("-EQ", "-SM"))
+    }
+    os.makedirs("logs", exist_ok=True)
+    tmp = NSE_INSTRUMENT_CACHE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(mapping, f)
+    os.replace(tmp, NSE_INSTRUMENT_CACHE)
+    _nse_instrument_cache = mapping
+    return mapping
+
+
+def _resolve_nse_token(symbol: str):
+    """Best-effort SYMBOL -> NSE-EQ token lookup. Returns None if unknown."""
+    return _load_nse_instrument_cache().get(symbol.strip().upper())
+
 
 # ── Timing ────────────────────────────────────────────────────────
 SQUAREOFF_TIME    = "15:15"
@@ -443,6 +606,21 @@ class AngelTrader:
         # Angel's API has no historical PCR (see options_confirmation.py).
         self._pcr_cache = {"value": None, "ts": None}
 
+        # Heavyweights tab — real-time ltp/close (shares _idx_cache above);
+        # 20-day avg volume refreshed once per day.
+        self._hw_started    = False
+        self._hw_avg_vol      = {}    # token -> 20-day avg daily volume
+        self._hw_avg_vol_date = None
+
+        # My Portfolio tab — real-time ltp/close for whatever's in
+        # logs/portfolio.json (shares _idx_cache above); token set is
+        # re-read from disk each poll so newly-added holdings pick up
+        # automatically without a restart.
+        self._portfolio_started = False
+
+        # Watchlist (left rail on the Portfolio tab) — same real-time pattern.
+        self._watchlist_started = False
+
         # Underlying EMA9 reference — kept fresh even while a position is
         # open, so _manage_position can check EMA_EXIT (backtest.py's
         # dominant exit mechanism, ported here to match validated results).
@@ -548,17 +726,32 @@ class AngelTrader:
             self._vix_ws_feed = None
         self._vix_started   = False
         self._sector_started = False
+        self._hw_started     = False
+        self._portfolio_started = False
+        self._watchlist_started = False
         self._start_vix_feed()
         self._start_sector_feed()
+        self._start_heavyweights_feed()
+        self._start_portfolio_feed()
+        self._start_watchlist_feed()
         logger.info("AngelTrader: login OK")
 
     def _ensure_session(self):
+        # Double-checked locking: many Flask request threads can call this at
+        # once (e.g. right after a restart) and race to call login()
+        # concurrently — Angel One's session semantics make a losing
+        # concurrent login clobber self.connected back to False even though
+        # the winning one already has a working session.
         if self._obj is None:
-            self.login()
+            with self._lock:
+                if self._obj is None:
+                    self.login()
             return
         if self._last_login and (_now() - self._last_login).total_seconds() > 6.5 * 3600:
-            logger.info("AngelTrader: session refresh")
-            self.login()
+            with self._lock:
+                if self._last_login and (_now() - self._last_login).total_seconds() > 6.5 * 3600:
+                    logger.info("AngelTrader: session refresh")
+                    self.login()
 
     # ── Market data ───────────────────────────────────────────────
 
@@ -636,11 +829,13 @@ class AngelTrader:
 
     def _fetch_quote_batch(self, token_groups: dict):
         """Batched quote calls (chunked to stay under Angel's per-request
-        cap) — refreshes ltp+close in self._idx_cache for every token in
-        token_groups."""
+        cap) — refreshes ltp+close(+volume) in self._idx_cache for every
+        token in token_groups."""
         now = time.monotonic()
         for exch, tokens in token_groups.items():
             for i in range(0, len(tokens), 40):
+                if i:
+                    time.sleep(0.25)   # space out chunked requests, stay under Angel's per-second cap
                 chunk = tokens[i:i + 40]
                 resp = self._obj.getMarketData("FULL", {exch: chunk})
                 if not (resp and resp.get("status") and resp.get("data")):
@@ -656,6 +851,16 @@ class AngelTrader:
                     entry["close"] = close
                     entry["ltp"]   = ltp
                     entry["ts"]    = now
+                    try:
+                        entry["volume"] = float(row.get("tradeVolume"))
+                    except (TypeError, ValueError):
+                        pass
+                    for dst, src in (("high", "high"), ("low", "low"),
+                                     ("week52_high", "52WeekHigh"), ("week52_low", "52WeekLow")):
+                        try:
+                            entry[dst] = float(row.get(src))
+                        except (TypeError, ValueError):
+                            pass
 
     @staticmethod
     def _closest_close(closes, target_date):
@@ -862,6 +1067,509 @@ class AngelTrader:
         except Exception as e:
             logger.warning(f"get_sector_indices: {e}")
             return []
+
+    # ── Heavyweights tab: full Nifty 50 weighted constituent set, real-time ──
+
+    def _start_heavyweights_feed(self):
+        if self._hw_started or not (self._auth and self._feed_token):
+            return
+        self._hw_started = True
+        my_epoch = self._idx_epoch
+        tokens = [token for _s, token, _w in NIFTY50_CONSTITUENTS] + [NIFTY50_INDEX_TOKEN]
+        hw_groups = {"NSE": tokens}
+
+        def _rest_loop():
+            while self._idx_epoch == my_epoch:
+                try:
+                    self._fetch_quote_batch(hw_groups)
+                except Exception as e:
+                    logger.warning(f"Heavyweights REST refresh: {e}")
+                time.sleep(15)
+
+        try:
+            self._fetch_quote_batch(hw_groups)   # seed before the first request lands
+        except Exception as e:
+            logger.warning(f"Heavyweights REST seed: {e}")
+
+        threading.Thread(target=_rest_loop, daemon=True, name="HeavyweightsRest").start()
+
+        # 49 sequential historical-candle fetches (~20-30s) — must run off the
+        # request thread, same reasoning as the sector tab's _fetch_stock_history.
+        def _avgvol_loop():
+            while self._idx_epoch == my_epoch:
+                try:
+                    self._maybe_refresh_hw_avg_volumes()
+                except Exception as e:
+                    logger.warning(f"Heavyweights avg-volume refresh: {e}")
+                time.sleep(300)   # cheap re-check; the method itself no-ops once today's done
+
+        threading.Thread(target=_avgvol_loop, daemon=True, name="HeavyweightsAvgVol").start()
+
+    def _maybe_refresh_hw_avg_volumes(self):
+        """20-trading-day average daily volume per constituent (excludes
+        today) — refreshed once per day, cheap enough to do anytime."""
+        today = _today()
+        if self._hw_avg_vol_date == today:
+            return
+        from angel_data import _fetch_daily
+        avg_vol = {}
+        for sym, token, _w in NIFTY50_CONSTITUENTS:
+            try:
+                df = _fetch_daily(self._auth, self._api_key, token,
+                                  today - timedelta(days=60), today)
+                df  = df[df.index.date < today]
+                vol = df["Volume"].tail(HW_AVG_VOL_LOOKBACK_DAYS)
+                if len(vol):
+                    avg_vol[token] = float(vol.mean())
+            except Exception as e:
+                logger.warning(f"Heavyweights 20d avg volume fetch failed for {sym}: {e}")
+            time.sleep(0.35)   # stay under Angel's historical-API rate limit
+        if avg_vol:
+            self._hw_avg_vol.update(avg_vol)
+            self._hw_avg_vol_date = today
+
+    @staticmethod
+    def _classify_heavyweights(rows):
+        """BULLISH BOOM / FALSE RALLY-WEAK / BEARISH DRAG / SIDEWAYS, using
+        index-weight-adjusted breadth (not raw stock counts) and the
+        weight-adjusted mean volume-ratio as the "volume" gate. The 4/5 and
+        3/5 thresholds from the original top-5 rule generalize to 80%/60%
+        of total index weight."""
+        weighed = [r for r in rows if r["pct_change"] is not None]
+        total_w = sum(r["weight"] for r in weighed) or 1.0
+        pos_w = sum(r["weight"] for r in weighed if r["pct_change"] > 0)
+        neg_w = sum(r["weight"] for r in weighed if r["pct_change"] < 0)
+        pos_pct = pos_w / total_w * 100
+        neg_pct = neg_w / total_w * 100
+
+        vol_rows  = [r for r in rows if r["vol_ratio"] is not None]
+        vol_w     = sum(r["weight"] for r in vol_rows) or 1.0
+        avg_ratio = sum(r["weight"] * r["vol_ratio"] for r in vol_rows) / vol_w
+        high_vol  = avg_ratio > HW_VOL_SPIKE_MULT
+
+        if pos_pct >= HW_BULLISH_WEIGHT_PCT and high_vol:
+            return {"signal": "BULLISH BOOM", "tone": "bullish",
+                    "reason": f"{pos_pct:.0f}% of index weight up on {avg_ratio:.2f}x avg volume"}
+        if neg_pct >= HW_BEARISH_WEIGHT_PCT and high_vol:
+            return {"signal": "BEARISH DRAG", "tone": "bearish",
+                    "reason": f"{neg_pct:.0f}% of index weight down on {avg_ratio:.2f}x avg volume"}
+        if pos_pct >= HW_BEARISH_WEIGHT_PCT and not high_vol:
+            return {"signal": "FALSE RALLY / WEAK", "tone": "weak",
+                    "reason": f"{pos_pct:.0f}% of index weight up but only {avg_ratio:.2f}x avg volume"}
+        return {"signal": "SIDEWAYS / NO TREND", "tone": "flat",
+                "reason": f"mixed/flat, {avg_ratio:.2f}x avg volume"}
+
+    def get_heavyweights(self):
+        try:
+            self._ensure_session()
+            self._start_heavyweights_feed()   # also kicks off the (async) avg-volume refresh
+            now = time.monotonic()
+            rows = []
+            for sym, token, weight in NIFTY50_CONSTITUENTS:
+                entry = self._idx_cache.get(token, {})
+                ltp, close, ts = entry.get("ltp"), entry.get("close"), entry.get("ts")
+                volume  = entry.get("volume")
+                avg_vol = self._hw_avg_vol.get(token)
+
+                pct_change = round((ltp - close) / close * 100, 2) if ltp is not None and close else None
+                vol_ratio  = round(volume / avg_vol, 2) if volume is not None and avg_vol else None
+
+                rows.append({
+                    "symbol": sym, "weight": weight,
+                    "ltp": round(ltp, 2) if ltp is not None else None,
+                    "pct_change": pct_change,
+                    "volume": volume, "avg_volume": avg_vol, "vol_ratio": vol_ratio,
+                    "live": bool(ts and (now - ts) < 25),
+                })
+            result = self._classify_heavyweights(rows)
+            result["pos_weight_pct"] = round(
+                sum(r["weight"] for r in rows if r["pct_change"] is not None and r["pct_change"] > 0), 1)
+            result["neg_weight_pct"] = round(
+                sum(r["weight"] for r in rows if r["pct_change"] is not None and r["pct_change"] < 0), 1)
+            result["stocks"] = rows
+            result["time"] = _now().strftime("%H:%M:%S")
+
+            # Real NIFTY 50 index (live) vs the weighted-basket-implied change,
+            # so the tab can show whether the index move is broad-based or
+            # driven by a narrow slice of heavyweights.
+            idx_entry = self._idx_cache.get(NIFTY50_INDEX_TOKEN, {})
+            idx_ltp, idx_close, idx_ts = idx_entry.get("ltp"), idx_entry.get("close"), idx_entry.get("ts")
+            idx_pct = round((idx_ltp - idx_close) / idx_close * 100, 2) if idx_ltp is not None and idx_close else None
+            weighed = [r for r in rows if r["pct_change"] is not None]
+            basket_pct = (round(sum(r["weight"] * r["pct_change"] for r in weighed) /
+                                 (sum(r["weight"] for r in weighed) or 1.0), 2)
+                          if weighed else None)
+            result["index"] = {
+                "ltp": round(idx_ltp, 2) if idx_ltp is not None else None,
+                "pct_change": idx_pct,
+                "basket_pct_change": basket_pct,
+                "live": bool(idx_ts and (now - idx_ts) < 25),
+            }
+            return result
+        except Exception as e:
+            logger.warning(f"get_heavyweights: {e}")
+            return {"signal": "SIDEWAYS / NO TREND", "tone": "flat", "reason": "data unavailable",
+                    "stocks": [], "index": {}, "time": _now().strftime("%H:%M:%S")}
+
+    # ── My Portfolio tab: manually-tracked holdings + cash, real-time ─
+
+    def _start_portfolio_feed(self):
+        if self._portfolio_started or not (self._auth and self._feed_token):
+            return
+        self._portfolio_started = True
+        my_epoch = self._idx_epoch
+
+        def _rest_loop():
+            while self._idx_epoch == my_epoch:
+                try:
+                    holdings = _load_portfolio_state()["holdings"]
+                    tokens = sorted({h["token"] for h in holdings if h.get("token")})
+                    if tokens:
+                        self._fetch_quote_batch({"NSE": tokens})
+                except Exception as e:
+                    logger.warning(f"Portfolio REST refresh: {e}")
+                time.sleep(15)
+
+        threading.Thread(target=_rest_loop, daemon=True, name="PortfolioRest").start()
+
+    @staticmethod
+    def _classify_holding(day_change_pct, pnl_pct):
+        """Rule-based profit-booking / re-entry hint for one holding."""
+        if day_change_pct is not None and day_change_pct >= PORTFOLIO_TAKE_PROFIT_DAY_PCT and (pnl_pct or 0) > 0:
+            return {"signal": "TAKE PARTIAL PROFIT", "tone": "bullish",
+                    "note": f"Up {day_change_pct:.1f}% today — consider booking some quantity here "
+                            f"and waiting for a pullback before adding back."}
+        if day_change_pct is not None and day_change_pct <= -PORTFOLIO_TAKE_PROFIT_DAY_PCT:
+            if (pnl_pct or 0) > 0:
+                return {"signal": "WATCH FOR RE-ENTRY", "tone": "weak",
+                        "note": f"Down {day_change_pct:.1f}% today but still in profit overall — "
+                                f"a pullback worth watching for a possible re-entry if it stabilizes."}
+            return {"signal": "WEAK — MONITOR", "tone": "bearish",
+                    "note": f"Down {day_change_pct:.1f}% today and currently underwater — watch closely."}
+        if pnl_pct is not None and pnl_pct <= PORTFOLIO_STOPLOSS_PCT:
+            return {"signal": "REVIEW — DEEP LOSS", "tone": "bearish",
+                    "note": f"{pnl_pct:.1f}% below your buy price — reassess the thesis or your stop-loss plan."}
+        return {"signal": "HOLD", "tone": "flat", "note": "No unusual move today."}
+
+    def get_portfolio(self):
+        try:
+            self._ensure_session()
+            self._start_portfolio_feed()
+            now = time.monotonic()
+            state = _load_portfolio_state()
+            holdings = state["holdings"]
+
+            rows = []
+            for h in holdings:
+                token = h.get("token")
+                entry = self._idx_cache.get(token, {}) if token else {}
+                ltp, close, ts = entry.get("ltp"), entry.get("close"), entry.get("ts")
+                qty, buy_price = float(h["qty"]), float(h["buy_price"])
+
+                day_change_pct = round((ltp - close) / close * 100, 2) if ltp is not None and close else None
+                invested       = round(qty * buy_price, 2)
+                current_value  = round(qty * ltp, 2) if ltp is not None else None
+                pnl            = round(current_value - invested, 2) if current_value is not None else None
+                pnl_pct        = round((ltp - buy_price) / buy_price * 100, 2) if ltp is not None and buy_price else None
+                day_pnl        = round(qty * (ltp - close), 2) if ltp is not None and close else None
+                week52_high    = entry.get("week52_high")
+                off_52w_high   = round((ltp - week52_high) / week52_high * 100, 2) if ltp is not None and week52_high else None
+
+                verdict = self._classify_holding(day_change_pct, pnl_pct)
+                rows.append({
+                    "id": h["id"], "symbol": h["symbol"], "qty": qty, "buy_price": buy_price,
+                    "buy_date": h.get("buy_date"),
+                    "ltp": round(ltp, 2) if ltp is not None else None,
+                    "day_change_pct": day_change_pct, "invested": invested,
+                    "current_value": current_value, "pnl": pnl, "pnl_pct": pnl_pct,
+                    "day_pnl": day_pnl, "off_52w_high_pct": off_52w_high,
+                    "signal": verdict["signal"], "tone": verdict["tone"], "note": verdict["note"],
+                    "live": bool(ts and (now - ts) < 25),
+                })
+
+            priced = [r for r in rows if r["current_value"] is not None]
+            cash = round(float(state.get("cash", 0.0)), 2)
+            totals = {
+                "cash":          cash,
+                "invested":      round(sum(r["invested"] for r in rows), 2),
+                "current_value": round(sum(r["current_value"] for r in priced), 2),
+                "pnl":           round(sum(r["pnl"] for r in priced), 2),
+                "day_pnl":       round(sum(r["day_pnl"] for r in priced if r["day_pnl"] is not None), 2),
+                "realized_pnl":  round(float(state.get("realized_pnl", 0.0)), 2),
+            }
+            totals["pnl_pct"] = (round(totals["pnl"] / totals["invested"] * 100, 2)
+                                  if totals["invested"] else None)
+            totals["total_value"] = round(cash + totals["current_value"], 2)
+
+            return {"holdings": rows, "totals": totals, "time": _now().strftime("%H:%M:%S")}
+        except Exception as e:
+            logger.warning(f"get_portfolio: {e}")
+            return {"holdings": [], "totals": {}, "time": _now().strftime("%H:%M:%S"), "error": str(e)}
+
+    def set_portfolio_cash(self, amount: float):
+        self._ensure_session()
+        if amount < 0:
+            raise ValueError("Funds can't be negative.")
+        state = _load_portfolio_state()
+        state["cash"] = float(amount)
+        _save_portfolio_state(state)
+        return state["cash"]
+
+    def add_portfolio_holding(self, symbol: str, qty: float, buy_price: float, buy_date: str = None):
+        """Bookkeeping entry for a position you already hold — does NOT
+        touch tracked cash (use buy_holding for a purchase funded from it)."""
+        self._ensure_session()
+        symbol = symbol.strip().upper()
+        token = _resolve_nse_token(symbol)
+        if not token:
+            raise ValueError(f"Couldn't find '{symbol}' on the NSE — check the ticker spelling.")
+        if qty <= 0 or buy_price <= 0:
+            raise ValueError("Quantity and buy price must both be positive.")
+
+        state = _load_portfolio_state()
+        entry = {
+            "id": uuid.uuid4().hex[:12], "symbol": symbol, "token": token,
+            "qty": qty, "buy_price": buy_price, "buy_date": buy_date,
+        }
+        state["holdings"].append(entry)
+        _save_portfolio_state(state)
+
+        # New token — seed it into the cache immediately so it's not blank
+        # until the next 15s poll.
+        try:
+            self._fetch_quote_batch({"NSE": [token]})
+        except Exception as e:
+            logger.warning(f"seed quote for new holding {symbol}: {e}")
+        return entry
+
+    def remove_portfolio_holding(self, holding_id: str):
+        state = _load_portfolio_state()
+        remaining = [h for h in state["holdings"] if h["id"] != holding_id]
+        if len(remaining) == len(state["holdings"]):
+            raise ValueError("Holding not found.")
+        state["holdings"] = remaining
+        _save_portfolio_state(state)
+
+    def buy_holding(self, symbol: str, qty: float, price: float, buy_date: str = None):
+        """A purchase funded from tracked cash — blends into an existing
+        position (weighted-average cost) or opens a new one, and deducts
+        the cost from available funds."""
+        self._ensure_session()
+        symbol = symbol.strip().upper()
+        token = _resolve_nse_token(symbol)
+        if not token:
+            raise ValueError(f"Couldn't find '{symbol}' on the NSE — check the ticker spelling.")
+        if qty <= 0 or price <= 0:
+            raise ValueError("Quantity and price must both be positive.")
+
+        cost = round(qty * price, 2)
+        state = _load_portfolio_state()
+        if cost > state.get("cash", 0.0) + 1e-6:
+            raise ValueError(f"Not enough funds: this buy costs ₹{cost:,.2f} but only "
+                              f"₹{state.get('cash', 0.0):,.2f} is available.")
+
+        existing = next((h for h in state["holdings"] if h["symbol"] == symbol), None)
+        if existing:
+            old_qty, old_price = float(existing["qty"]), float(existing["buy_price"])
+            new_qty = old_qty + qty
+            existing["buy_price"] = round((old_qty * old_price + qty * price) / new_qty, 4)
+            existing["qty"] = new_qty
+            entry = existing
+        else:
+            entry = {"id": uuid.uuid4().hex[:12], "symbol": symbol, "token": token,
+                      "qty": qty, "buy_price": price, "buy_date": buy_date}
+            state["holdings"].append(entry)
+
+        state["cash"] = round(state.get("cash", 0.0) - cost, 2)
+        _save_portfolio_state(state)
+        _append_portfolio_transaction({"ts": _now().isoformat(), "type": "buy", "symbol": symbol,
+                                        "qty": qty, "price": price, "amount": cost})
+
+        try:
+            self._fetch_quote_batch({"NSE": [token]})
+        except Exception as e:
+            logger.warning(f"seed quote for buy {symbol}: {e}")
+        return entry
+
+    def sell_holding(self, holding_id: str, qty: float, price: float):
+        """Sells (fully or partially) a tracked holding, crediting the
+        proceeds back to available funds and logging realized P&L."""
+        self._ensure_session()
+        if qty <= 0 or price <= 0:
+            raise ValueError("Quantity and price must both be positive.")
+
+        state = _load_portfolio_state()
+        holding = next((h for h in state["holdings"] if h["id"] == holding_id), None)
+        if not holding:
+            raise ValueError("Holding not found.")
+        held_qty = float(holding["qty"])
+        if qty > held_qty + 1e-6:
+            raise ValueError(f"You only hold {held_qty:g} shares of {holding['symbol']}.")
+
+        proceeds = round(qty * price, 2)
+        realized = round(qty * (price - float(holding["buy_price"])), 2)
+
+        if qty >= held_qty - 1e-6:
+            state["holdings"] = [h for h in state["holdings"] if h["id"] != holding_id]
+        else:
+            holding["qty"] = round(held_qty - qty, 4)
+
+        state["cash"] = round(state.get("cash", 0.0) + proceeds, 2)
+        state["realized_pnl"] = round(state.get("realized_pnl", 0.0) + realized, 2)
+        _save_portfolio_state(state)
+        _append_portfolio_transaction({"ts": _now().isoformat(), "type": "sell", "symbol": holding["symbol"],
+                                        "qty": qty, "price": price, "amount": proceeds, "realized_pnl": realized})
+        return {"symbol": holding["symbol"], "qty": qty, "price": price,
+                "proceeds": proceeds, "realized_pnl": realized}
+
+    # ── Watchlist tab (left rail): price-only tracking ───────────────
+
+    def _start_watchlist_feed(self):
+        if self._watchlist_started or not (self._auth and self._feed_token):
+            return
+        self._watchlist_started = True
+        my_epoch = self._idx_epoch
+
+        def _rest_loop():
+            while self._idx_epoch == my_epoch:
+                try:
+                    stocks = _load_watchlist()
+                    tokens = sorted({s["token"] for s in stocks if s.get("token")})
+                    if tokens:
+                        self._fetch_quote_batch({"NSE": tokens})
+                except Exception as e:
+                    logger.warning(f"Watchlist REST refresh: {e}")
+                time.sleep(15)
+
+        threading.Thread(target=_rest_loop, daemon=True, name="WatchlistRest").start()
+
+    def get_watchlist(self):
+        try:
+            self._ensure_session()
+            self._start_watchlist_feed()
+            now = time.monotonic()
+            rows = []
+            for s in _load_watchlist():
+                entry = self._idx_cache.get(s.get("token"), {})
+                ltp, close, ts = entry.get("ltp"), entry.get("close"), entry.get("ts")
+                pct_change = round((ltp - close) / close * 100, 2) if ltp is not None and close else None
+                rows.append({
+                    "id": s["id"], "symbol": s["symbol"],
+                    "ltp": round(ltp, 2) if ltp is not None else None,
+                    "pct_change": pct_change,
+                    "live": bool(ts and (now - ts) < 25),
+                    "fundamentals": s.get("fundamentals"),
+                })
+            return {"stocks": rows, "time": _now().strftime("%H:%M:%S")}
+        except Exception as e:
+            logger.warning(f"get_watchlist: {e}")
+            return {"stocks": [], "time": _now().strftime("%H:%M:%S"), "error": str(e)}
+
+    def add_watchlist_symbol(self, symbol: str):
+        self._ensure_session()
+        symbol = symbol.strip().upper()
+        token = _resolve_nse_token(symbol)
+        if not token:
+            raise ValueError(f"Couldn't find '{symbol}' on the NSE — check the ticker spelling.")
+
+        stocks = _load_watchlist()
+        if any(s["symbol"] == symbol for s in stocks):
+            raise ValueError(f"{symbol} is already on your watchlist.")
+        entry = {"id": uuid.uuid4().hex[:12], "symbol": symbol, "token": token}
+        stocks.append(entry)
+        _save_watchlist(stocks)
+
+        try:
+            self._fetch_quote_batch({"NSE": [token]})   # seed immediately, don't wait for the next 15s poll
+        except Exception as e:
+            logger.warning(f"seed quote for new watch {symbol}: {e}")
+        return entry
+
+    def remove_watchlist_symbol(self, watch_id: str):
+        stocks = _load_watchlist()
+        remaining = [s for s in stocks if s["id"] != watch_id]
+        if len(remaining) == len(stocks):
+            raise ValueError("Symbol not found.")
+        _save_watchlist(remaining)
+
+    def set_watchlist_fundamentals(self, symbol: str, fundamentals: dict):
+        """Attaches a fundamentals snapshot (PE, 3Y profit/sales growth, ROE,
+        debt/equity, promoter holding) to a watchlist entry. This is NOT
+        live data — Angel's API has no fundamentals, and Yahoo Finance
+        (yfinance) is unreliable from this network, so snapshots are
+        gathered on request (e.g. from screener.in) and dated with
+        `as_of` rather than continuously refreshed."""
+        symbol = symbol.strip().upper()
+        stocks = _load_watchlist()
+        entry = next((s for s in stocks if s["symbol"] == symbol), None)
+        if not entry:
+            raise ValueError(f"{symbol} is not on your watchlist.")
+        entry["fundamentals"] = fundamentals
+        _save_watchlist(stocks)
+        return entry
+
+    # ── Recommendations: cross-references Heavyweights (index/market
+    # trend), My Portfolio (holdings + cash), and Watchlist (buy
+    # candidates) into a short list of rule-based hints. Not investment
+    # advice — every card traces back to a number already on the dashboard.
+
+    def get_recommendations(self):
+        try:
+            hw = self.get_heavyweights()
+            pf = self.get_portfolio()
+            wl = self.get_watchlist()
+            cards = []
+
+            tone = hw.get("tone", "flat")
+            market_note = {
+                "bullish": "Broad-based strength with volume backing — a supportive backdrop for adding exposure.",
+                "bearish": "Broad-based weakness with volume backing — a reasonable day to hold cash or trim rather than buy.",
+                "weak":    "The move looks thin on volume — don't chase it.",
+                "flat":    "No strong directional signal today — stay selective.",
+            }.get(tone, "")
+            cards.append({"type": "market", "tone": tone,
+                          "title": f"Market: {hw.get('signal', 'SIDEWAYS / NO TREND')}",
+                          "text": f"{hw.get('reason', '')}. {market_note}"})
+
+            for h in pf.get("holdings", []):
+                if h["signal"] != "HOLD":
+                    cards.append({"type": "holding", "tone": h["tone"],
+                                  "title": f"{h['symbol']}: {h['signal']}", "text": h["note"]})
+
+            cash = pf.get("totals", {}).get("cash") or 0.0
+            wl_stocks = wl.get("stocks", [])
+            if cash < 1:
+                cards.append({"type": "cash", "tone": "flat", "title": "No funds tracked",
+                              "text": "Set your available funds on the Portfolio tab so I can suggest where to deploy them."})
+            elif tone == "bearish":
+                cards.append({"type": "cash", "tone": "weak", "title": f"₹{cash:,.0f} in cash — consider waiting",
+                              "text": f"{hw.get('signal')} on the index right now. Holding cash rather than "
+                                      f"buying into broad weakness is a reasonable call."})
+            else:
+                dippers = sorted([s for s in wl_stocks if s.get("pct_change") is not None and s["pct_change"] < 0],
+                                  key=lambda s: s["pct_change"])
+                if not dippers:
+                    cards.append({"type": "cash", "tone": "flat", "title": f"₹{cash:,.0f} in cash",
+                                  "text": "Nothing on your watchlist is pulling back today — add candidates there "
+                                          "so I can flag dips worth a look."})
+                else:
+                    best = dippers[0]
+                    afford = int(cash // best["ltp"]) if best.get("ltp") else 0
+                    if afford > 0:
+                        cards.append({"type": "cash", "tone": "bullish",
+                                      "title": f"₹{cash:,.0f} available — {best['symbol']} is down {best['pct_change']:.2f}% today",
+                                      "text": f"On your watchlist and pulling back while the index is "
+                                              f"{hw.get('signal','').lower()}. At ₹{best['ltp']:.2f}/share you "
+                                              f"could buy up to {afford} share(s) with your available funds."})
+                    else:
+                        cards.append({"type": "cash", "tone": "flat", "title": f"₹{cash:,.0f} in cash",
+                                      "text": f"{best['symbol']} is down {best['pct_change']:.2f}% today but even "
+                                              f"1 share (₹{best['ltp']:.2f}) exceeds your available funds."})
+
+            return {"cards": cards, "time": _now().strftime("%H:%M:%S")}
+        except Exception as e:
+            logger.warning(f"get_recommendations: {e}")
+            return {"cards": [], "time": _now().strftime("%H:%M:%S"), "error": str(e)}
 
     def get_option_ltp(self, symbol, token):
         try:
