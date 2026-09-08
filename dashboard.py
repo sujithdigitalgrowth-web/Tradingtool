@@ -58,20 +58,17 @@ def _init_trader():
             paper               = bool(cfg.get("paper", False))
             max_daily_loss      = float(cfg.get("max_daily_loss", bt.MAX_DAILY_LOSS))
             daily_profit_target = float(cfg.get("daily_profit_target", bt.DAILY_PROFIT_TARGET))
-            strategy            = cfg.get("strategy", "v2")
             manual_target_pct   = cfg.get("manual_target_pct")
             carry_overnight     = bool(cfg.get("carry_overnight", False))
             t.start(max_trades=max_trades, lots=lots, paper_mode=paper,
                    max_daily_loss=max_daily_loss, daily_profit_target=daily_profit_target,
-                   strategy=strategy,
                    manual_target_pct=(float(manual_target_pct) / 100.0 if manual_target_pct else None),
                    carry_overnight=carry_overnight)
             from logzero import logger
-            logger.info(f"Auto-resumed trading: strategy={strategy}, {lots} lot(s), "
+            logger.info(f"Auto-resumed trading: {lots} lot(s), "
                        f"max {max_trades} trades, paper={paper}")
             mode = "📋 PAPER" if paper else "🟢 LIVE"
             _tg(f"🔄 <b>Server Restarted — Trading Auto-Resumed</b>\n"
-                f"Strategy: {strategy}\n"
                 f"Mode   : {mode}\n"
                 f"Lots   : {lots}  |  Max trades: {max_trades}\n"
                 f"Time   : {datetime.now().strftime('%d %b %Y %H:%M:%S')}\n"
@@ -109,7 +106,6 @@ def _get_trading_config():
         "active":              bool(cfg.get("active", False)),
         "max_daily_loss":      float(cfg.get("max_daily_loss", bt.MAX_DAILY_LOSS)),
         "daily_profit_target": float(cfg.get("daily_profit_target", bt.DAILY_PROFIT_TARGET)),
-        "strategy":            cfg.get("strategy", "v2"),
         "manual_target_pct":   float(manual_target_pct) if manual_target_pct is not None else None,
         "carry_overnight":     bool(cfg.get("carry_overnight", False)),
     }
@@ -194,9 +190,6 @@ def api_start_trading():
     paper               = bool(body.get("paper", False))
     max_daily_loss      = min(-500, max(-50000, float(body.get("max_daily_loss", bt.MAX_DAILY_LOSS))))
     daily_profit_target = max(500, min(50000, float(body.get("daily_profit_target", bt.DAILY_PROFIT_TARGET))))
-    strategy            = body.get("strategy", "v2")
-    if strategy not in ("v2", "supertrend"):
-        strategy = "v2"
     manual_target_pct = _parse_manual_target_pct(body)
     if manual_target_pct == "unset":
         manual_target_pct = None
@@ -205,16 +198,15 @@ def api_start_trading():
         t = get_trader()
         t.start(max_trades=max_trades, lots=lots, paper_mode=paper,
                max_daily_loss=max_daily_loss, daily_profit_target=daily_profit_target,
-               strategy=strategy,
                manual_target_pct=(manual_target_pct / 100.0 if manual_target_pct else None),
                carry_overnight=carry_overnight)
         _save_trading_config({"max_trades": max_trades, "lots": lots, "paper": paper, "active": True,
                               "max_daily_loss": max_daily_loss, "daily_profit_target": daily_profit_target,
-                              "strategy": strategy, "manual_target_pct": manual_target_pct,
+                              "manual_target_pct": manual_target_pct,
                               "carry_overnight": carry_overnight})
         return jsonify({"status": "started", "max_trades": max_trades, "lots": lots, "paper": paper,
                         "max_daily_loss": max_daily_loss, "daily_profit_target": daily_profit_target,
-                        "strategy": strategy, "manual_target_pct": manual_target_pct,
+                        "manual_target_pct": manual_target_pct,
                         "carry_overnight": carry_overnight})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -346,7 +338,6 @@ def api_set_config():
     cfg = {"max_trades": max_trades, "lots": lots,
            "paper": existing.get("paper", True), "active": existing.get("active", False),
            "max_daily_loss": max_daily_loss, "daily_profit_target": daily_profit_target,
-           "strategy": existing.get("strategy", "v2"),
            "manual_target_pct": manual_target_pct, "carry_overnight": carry_overnight}
     _save_trading_config(cfg)
     return jsonify(cfg)
@@ -652,6 +643,25 @@ TEMPLATE = r"""
           <div><p class="text-xs text-gray-400 mb-0.5">Invested</p><p id="pos-invested" class="font-bold text-gray-700"></p></div>
         </div>
         <div id="pos-tags" class="flex gap-2 mt-3"></div>
+
+        <div class="flex flex-wrap items-center gap-4 mt-4 pt-4 border-t border-gray-100">
+          <div class="flex items-center gap-2">
+            <label class="text-xs font-semibold text-gray-500" for="live-manual-target">Manual Target %</label>
+            <select id="live-manual-target" onchange="setManualTarget()"
+              class="border border-gray-300 rounded px-2 py-1.5 text-xs text-gray-800">
+              <option value="0">Off — hardcoded exit logic only</option>
+              <option value="5">5%</option>
+              <option value="10">10%</option>
+              <option value="15">15%</option>
+              <option value="20">20%</option>
+            </select>
+          </div>
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" id="live-carry-overnight" onchange="setCarryOvernight()" class="accent-purple-600"/>
+            <span class="text-xs font-semibold text-gray-500">Carry position overnight</span>
+          </label>
+          <span id="live-target-status" class="text-xs text-gray-400"></span>
+        </div>
       </div>
 
     </div>
@@ -688,7 +698,7 @@ TEMPLATE = r"""
       </div>
       <div class="flex items-center gap-2 mt-2">
         <span id="paper-badge" class="hidden text-xs font-bold px-3 py-1 rounded-full bg-blue-100 text-blue-700">PAPER</span>
-        <span id="strategy-badge" class="text-xs font-bold px-3 py-1 rounded-full bg-violet-100 text-violet-700">V2</span>
+        <span id="strategy-badge" class="text-xs font-bold px-3 py-1 rounded-full bg-violet-100 text-violet-700">SUPERTREND</span>
       </div>
 
       <div class="mt-4">
@@ -945,48 +955,6 @@ TEMPLATE = r"""
         </div>
       </div>
       <div>
-        <label class="text-sm font-semibold text-gray-700 block mb-2">Strategy</label>
-        <div class="flex gap-3">
-          <label class="flex items-center gap-2 cursor-pointer">
-            <input type="radio" name="m-strategy" id="m-strategy-v2" value="v2" checked
-              class="accent-blue-600"/>
-            <span class="text-sm text-gray-700">
-              <span class="font-semibold text-blue-700">V2</span>
-              <span class="text-xs text-gray-400 ml-1">— multi-filter (VWAP/EMA/RSI/ADX/VIX)</span>
-            </span>
-          </label>
-          <label class="flex items-center gap-2 cursor-pointer">
-            <input type="radio" name="m-strategy" id="m-strategy-supertrend" value="supertrend"
-              class="accent-purple-600"/>
-            <span class="text-sm text-gray-700">
-              <span class="font-semibold text-purple-700">Supertrend</span>
-              <span class="text-xs text-gray-400 ml-1">— (10,3) follower + 50pt SL</span>
-            </span>
-          </label>
-        </div>
-      </div>
-      <div>
-        <label class="text-sm font-semibold text-gray-700 block mb-1">Manual Target %</label>
-        <div class="flex items-center gap-3">
-          <select id="m-manual-target" class="border border-gray-300 rounded px-3 py-2 text-sm text-gray-800">
-            <option value="0">Off — hardcoded exit logic only</option>
-            <option value="5">5%</option>
-            <option value="10">10%</option>
-            <option value="15">15%</option>
-            <option value="20">20%</option>
-          </select>
-          <span class="text-xs text-gray-400">Extra take-profit, alongside SL/trail/flip — whichever hits first wins</span>
-        </div>
-      </div>
-      <div>
-        <label class="flex items-center gap-2 cursor-pointer">
-          <input type="checkbox" id="m-carry-overnight" class="accent-purple-600"/>
-          <span class="text-sm font-semibold text-gray-700">Carry position overnight</span>
-        </label>
-        <p class="text-xs text-gray-400 mt-1 ml-6">Skip end-of-day square-off and hold into the next trading day
-          (still force-closes on the contract's own expiry date). Off by default.</p>
-      </div>
-      <div>
         <label class="text-sm font-semibold text-gray-700 block mb-2">Mode</label>
         <div class="flex gap-3">
           <label class="flex items-center gap-2 cursor-pointer">
@@ -1008,6 +976,9 @@ TEMPLATE = r"""
         </div>
       </div>
     </div>
+
+    <p class="text-xs text-gray-400 mb-5">Manual Target % and Carry Overnight are set from the Open Position card
+      once a trade is live, so you can decide based on how the trade is actually going.</p>
 
     <div id="m-warning-paper" class="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3 mb-5 text-xs text-blue-800">
       📋 <strong>Paper mode:</strong> Signals fire and P&amp;L is tracked using real market prices,
@@ -1389,15 +1360,7 @@ function refreshLive(){
       bsStatus.textContent='Stopped';
     }
 
-    // Strategy + paper badges, hero subtitle
-    const strategy = (s.config && s.config.strategy) || 'v2';
-    const isST     = strategy === 'supertrend';
-    const stBadge  = document.getElementById('strategy-badge');
-    stBadge.textContent = isST ? 'SUPERTREND' : 'V2';
-    stBadge.className   = 'text-xs font-bold px-3 py-1 rounded-full '+
-      (isST ? 'bg-violet-100 text-violet-700' : 'bg-blue-100 text-blue-700');
-    document.getElementById('hero-subtitle').textContent =
-      (isST ? 'Supertrend' : 'V2')+' Strategy · Nifty 50 Options';
+    // Paper badge
     document.getElementById('paper-badge').classList.toggle('hidden', !(status==='PAPER'||s.paper_mode));
 
     // Buttons
@@ -1440,16 +1403,10 @@ function refreshLive(){
     // Bot Status: last signal, indicator, filter/error
     const bsLabel = document.getElementById('bs-indicator-label');
     const bsInd   = document.getElementById('bs-indicator');
-    if(isST){
-      bsLabel.textContent = 'Supertrend';
-      if(mkt.st_trend === 1)       { bsInd.textContent = 'Uptrend ▲';   bsInd.className = 'font-semibold text-green-600 text-right'; }
-      else if(mkt.st_trend === -1) { bsInd.textContent = 'Downtrend ▼'; bsInd.className = 'font-semibold text-red-600 text-right'; }
-      else                         { bsInd.textContent = '—';           bsInd.className = 'font-semibold text-gray-700 text-right'; }
-    } else {
-      bsLabel.textContent = 'India VIX';
-      bsInd.textContent   = mkt.vix ? mkt.vix+'' : '—';
-      bsInd.className     = 'font-semibold text-gray-700 text-right';
-    }
+    bsLabel.textContent = 'Supertrend';
+    if(mkt.st_trend === 1)       { bsInd.textContent = 'Uptrend ▲';   bsInd.className = 'font-semibold text-green-600 text-right'; }
+    else if(mkt.st_trend === -1) { bsInd.textContent = 'Downtrend ▼'; bsInd.className = 'font-semibold text-red-600 text-right'; }
+    else                         { bsInd.textContent = '—';           bsInd.className = 'font-semibold text-gray-700 text-right'; }
     const lastSigEl = document.getElementById('bs-last-signal');
     if(sig.signal){
       lastSigEl.textContent = sig.signal+(sig.time?' · '+sig.time:'');
@@ -1492,6 +1449,15 @@ function refreshLive(){
       if(pos.partial_done) tags+='<span class="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full">Partial exited</span>';
       if(pos.trail_on)     tags+='<span class="text-xs bg-violet-100 text-violet-700 px-2 py-0.5 rounded-full ml-1">Trail active</span>';
       document.getElementById('pos-tags').innerHTML=tags;
+
+      // Manual Target % / Carry Overnight — only reflect server state when the
+      // user isn't mid-edit (avoids clobbering a change they just made before
+      // the next poll lands).
+      const cfg = s.config||{};
+      const mtEl = document.getElementById('live-manual-target');
+      const coEl = document.getElementById('live-carry-overnight');
+      if(document.activeElement !== mtEl) mtEl.value = cfg.manual_target_pct ? String(cfg.manual_target_pct) : '0';
+      if(document.activeElement !== coEl) coEl.checked = !!cfg.carry_overnight;
 
       // +1 Lot / -1 Lot buttons
       const lotSize   = (s.config && s.config.lot_size) || 65;
@@ -1730,11 +1696,6 @@ function openStartModal(){
     const isPaper = cfg.paper !== false; // default to paper
     document.getElementById('m-mode-paper').checked = isPaper;
     document.getElementById('m-mode-live') .checked = !isPaper;
-    const isSupertrend = cfg.strategy === 'supertrend';
-    document.getElementById('m-strategy-v2')        .checked = !isSupertrend;
-    document.getElementById('m-strategy-supertrend').checked = isSupertrend;
-    document.getElementById('m-manual-target').value = cfg.manual_target_pct ? String(cfg.manual_target_pct) : '0';
-    document.getElementById('m-carry-overnight').checked = !!cfg.carry_overnight;
     updateModalUnits();
     updateModeWarning();
   }).catch(()=>{});
@@ -1765,14 +1726,11 @@ function confirmStart(){
   const max_trades=parseInt(document.getElementById('m-max-trades').value);
   const lots      =parseInt(document.getElementById('m-lots').value);
   const paper     =document.getElementById('m-mode-paper').checked;
-  const strategy  =document.getElementById('m-strategy-supertrend').checked ? 'supertrend' : 'v2';
-  const manual_target_pct = parseFloat(document.getElementById('m-manual-target').value) || 0;
-  const carry_overnight   = document.getElementById('m-carry-overnight').checked;
   closeModal();
   fetch('/api/start-trading',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({max_trades,lots,paper,strategy,manual_target_pct,carry_overnight})
+    body:JSON.stringify({max_trades,lots,paper})
   }).then(r=>r.json()).then(d=>{
     if(d.error) alert('Error: '+d.error);
     else setTimeout(refreshLive,1000);
@@ -1817,6 +1775,30 @@ function sellLot(){
       if(d.status==='error') alert('Error: '+d.message);
       setTimeout(refreshLive,500);
     }).catch(e=>alert('Error: '+e));
+}
+function setManualTarget(){
+  const pct = parseFloat(document.getElementById('live-manual-target').value) || 0;
+  const statusEl = document.getElementById('live-target-status');
+  statusEl.textContent = 'Saving…';
+  fetch('/api/manual-target',{
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({pct})
+  }).then(r=>r.json()).then(d=>{
+    statusEl.textContent = d.error ? 'Error: '+d.error : (pct ? 'Target set to '+pct+'%' : 'Manual target off');
+    setTimeout(()=>{ if(statusEl.textContent.indexOf('Error')!==0) statusEl.textContent=''; },3000);
+  }).catch(e=>{ statusEl.textContent='Error: '+e; });
+}
+function setCarryOvernight(){
+  const enabled = document.getElementById('live-carry-overnight').checked;
+  const statusEl = document.getElementById('live-target-status');
+  statusEl.textContent = 'Saving…';
+  fetch('/api/carry-overnight',{
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({enabled})
+  }).then(r=>r.json()).then(d=>{
+    statusEl.textContent = d.error ? 'Error: '+d.error : (enabled ? 'Will carry overnight' : 'Overnight carry off');
+    setTimeout(()=>{ if(statusEl.textContent.indexOf('Error')!==0) statusEl.textContent=''; },3000);
+  }).catch(e=>{ statusEl.textContent='Error: '+e; });
 }
 function testTrade(){
   if(!confirm('Place a REAL CE order on Angel One and auto-exit in 5 seconds?\n\nThis is for connectivity testing only — a real order will be placed.')) return;

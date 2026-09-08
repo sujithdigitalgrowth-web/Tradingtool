@@ -1,12 +1,12 @@
 """
 live_trader.py — Angel One Smart API live trading engine
-Strategy : V2 (VWAP + EMA9/20 + RSI + Volume + BNF + Supertrend + VIX)
+Strategy : Supertrend(10,3) directional flip (Strategy 6 / ST6)
 Lot size  : 65 (NSE, effective Oct 28 2025)
 """
 import os, json, time, threading, requests, struct, ssl, re, uuid
 from collections import deque
 import websocket
-import pandas as pd, numpy as np
+import pandas as pd
 from datetime import date, datetime, timedelta, timezone
 from logzero import logger, logfile
 from dotenv import load_dotenv
@@ -443,28 +443,19 @@ class AngelTrader:
         # Angel's API has no historical PCR (see options_confirmation.py).
         self._pcr_cache = {"value": None, "ts": None}
 
-        # Underlying EMA9 reference — kept fresh even while a position is
-        # open, so _manage_position can check EMA_EXIT (backtest.py's
-        # dominant exit mechanism, ported here to match validated results).
-        self._ema_ref = {"close": None, "ema9": None, "ts": None}
-
-        # Supertrend(10,3) reference for the "supertrend" strategy — mirrors
-        # _ema_ref's role but for Strategy 6's single-indicator flip signal.
+        # Supertrend(10,3) reference — kept fresh even while a position is
+        # open, so _manage_position_supertrend and _check_signal_supertrend
+        # can read the current flip state.
         self._st_ref = {"value": None, "prev": None, "ts": None}
 
-        # Daily (prev-close) data never changes intraday — cache per day
-        # instead of re-hitting Angel One's historical API every ~2 minutes.
-        self._daily_cache = {"date": None, "df": None}
-
         # Config (set by start())
-        self.strategy      = "v2"   # "v2" | "supertrend" — which signal/exit path runs
         self.max_trades   = 2
         self.lots         = 1
         self.enabled      = False
         self.paper_mode   = False   # True = simulate orders, no real API calls
         self.max_daily_loss       = bt.MAX_DAILY_LOSS        # e.g. -8000; block entries once breached
         self.daily_profit_target  = bt.DAILY_PROFIT_TARGET   # e.g. 6000; block entries once hit
-        self.loss_cooldown_candles = bt.V2_LOSS_COOLDOWN_CANDLES  # 0 disables
+        self.loss_cooldown_candles = bt.ST6_LOSS_COOLDOWN_CANDLES  # 0 disables
         self.manual_target_pct    = None   # e.g. 0.10 for +10% -- user-set option-price take-
                                             # profit, checked alongside (not instead of) every
                                             # strategy's own SL/trail/flip/reversal logic; None
@@ -486,7 +477,7 @@ class AngelTrader:
         self._cooldown_last_ts   = None    # last candle timestamp we decremented cooldowns for
 
         # Signal info for display
-        self.sig_info     = {"signal": None, "vix": None,
+        self.sig_info     = {"signal": None,
                              "time": None, "next_check": None,
                              "filter_reason": None}
         self.last_error   = None
@@ -894,87 +885,16 @@ class AngelTrader:
 
     # ── Live data fetch for signal ────────────────────────────────
 
-    def _fetch_live_data(self):
-        """Fetch last 12 days of 5m candles (enough for EMA20 + buffer)."""
-        today    = _today()
-        lookback = today - timedelta(days=12)
-
-        df_nbees = _trim_forming_candle(_fetch_intraday(self._auth, self._api_key,
-                                   NIFTYBEES_TOKEN, lookback, today))
-        time.sleep(1)   # space out Angel One historical-API calls — avoid rate-limit throttling
-        df_bnf   = _trim_forming_candle(_fetch_intraday(self._auth, self._api_key,
-                                   BANKBEES_TOKEN, lookback, today))
-
-        # Daily (prev-close) data never changes intraday — fetch once per day
-        # and cache, instead of re-hitting the API every ~2-minute cycle.
-        if self._daily_cache["date"] == today and self._daily_cache["df"] is not None:
-            df_nifty_1d = self._daily_cache["df"]
-        else:
-            time.sleep(1)
-            df_1d = _fetch_daily(self._auth, self._api_key,
-                                 NIFTYBEES_TOKEN, lookback, today)
-            df_nifty_1d = df_1d.copy()
-            if not df_nifty_1d.empty:
-                for col in ["Open", "High", "Low", "Close"]:
-                    df_nifty_1d[col] = (df_nifty_1d[col] * NIFTY_MULTIPLIER).round(2)
-                self._daily_cache = {"date": today, "df": df_nifty_1d}
-            # empty result (fetch failed) — leave cache empty, retry next cycle
-
-        # VIX from NSE public API (live current value)
-        df_vix = pd.DataFrame()
-        try:
-            _sess = requests.Session()
-            _sess.get("https://www.nseindia.com",
-                      headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json",
-                                "Referer": "https://www.nseindia.com"}, timeout=5)
-            _resp = _sess.get("https://www.nseindia.com/api/allIndices",
-                              headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json",
-                                       "Referer": "https://www.nseindia.com"}, timeout=5)
-            _data = _resp.json().get("data", [])
-            _vix  = next((x["last"] for x in _data if "VIX" in x.get("indexSymbol", "")), None)
-            if _vix is not None:
-                import pytz
-                _ist = pytz.timezone("Asia/Kolkata")
-                _idx = pd.DatetimeIndex([pd.Timestamp(today).tz_localize(_ist)])
-                df_vix = pd.DataFrame({"Close": [float(_vix)]}, index=_idx)
-        except Exception:
-            pass
-
-        return df_nbees, df_nifty_1d, df_bnf, df_vix
-
     def _fetch_nbees_only(self):
         """
-        Lightweight fetch — just NIFTYBEES 5m candles, used to refresh the
-        EMA9 reference while a position is open. Skips BankNifty and daily
-        data (not needed for EMA_EXIT), roughly a third of the API calls
-        _fetch_live_data would make for the same purpose.
+        Fetch last 12 days of NIFTYBEES 5m candles (enough for Supertrend(10,3)
+        to warm up) — the only data Strategy 6's signal/exit logic needs.
         """
         today    = _today()
         lookback = today - timedelta(days=12)
         return _trim_forming_candle(_fetch_intraday(self._auth, self._api_key, NIFTYBEES_TOKEN, lookback, today))
 
-    # ── Signal detection (mirrors backtest V2 logic exactly) ─────
-
-    def _update_ema_ref(self, df_nbees):
-        """
-        Refresh the cached underlying (NIFTYBEES) close + EMA9, used by
-        _manage_position's EMA_EXIT check. Called from _check_signal (when no
-        position is open) and directly from _signal_loop (when a position IS
-        open, since _check_signal itself is skipped in that case).
-        """
-        try:
-            if df_nbees is None or df_nbees.empty or not isinstance(df_nbees.index, pd.DatetimeIndex):
-                return
-            today  = _today()
-            all_5m = df_nbees[df_nbees.index.date <= today].between_time("09:15", "15:30")
-            sday   = all_5m[all_5m.index.date == today]
-            if sday.empty:
-                return
-            ema_f = all_5m["Close"].ewm(span=bt.V2_EMA_FAST, adjust=False).mean().loc[sday.index]
-            self._ema_ref = {"close": float(sday.iloc[-1]["Close"]), "ema9": float(ema_f.iloc[-1]),
-                             "ts": sday.index[-1]}
-        except Exception as e:
-            logger.warning(f"EMA ref update failed: {e}")
+    # ── Signal detection ──────────────────────────────────────────
 
     def _update_st_ref(self, df_nbees):
         """
@@ -1043,192 +963,18 @@ class AngelTrader:
         self.sig_info["filter_reason"] = f"Supertrend {'up' if value == 1 else 'down'} — no flip"
         return None
 
-    def _check_signal(self, df_nbees, df_1d, df_bnf, df_vix):
+    def _check_signal(self, df_nbees):
         """
-        Run V2 indicator logic on latest closed 5m candle.
-        Returns ("BUY_CE" | "BUY_PE" | None, vix_value | None)
+        Global entry gate, then defer to Strategy 6's Supertrend flip signal.
+        Returns "BUY_CE" | "BUY_PE" | None.
         Also updates self.sig_info["filter_reason"] with why no signal fired.
         """
-        # Global cutoff — no new trades after NO_NEW_TRADE_TIME, either strategy.
+        # Global cutoff — no new trades after NO_NEW_TRADE_TIME.
         if _now().strftime("%H:%M") >= NO_NEW_TRADE_TIME:
             self.sig_info["filter_reason"] = f"No new trades after {NO_NEW_TRADE_TIME}"
-            return None, None
+            return None
 
-        if self.strategy == "supertrend":
-            return self._check_signal_supertrend(df_nbees), None
-
-        self._update_ema_ref(df_nbees)
-        today = _today()
-        now   = _now()
-
-        # VIX filter
-        vix_val = None
-        if (df_vix is not None and not df_vix.empty
-                and isinstance(df_vix.index, pd.DatetimeIndex)):
-            vix_rows = df_vix[df_vix.index.date <= today]
-            if not vix_rows.empty:
-                vix_val = round(float(vix_rows.iloc[-1]["Close"]), 2)
-                if not (bt.V2_VIX_MIN <= vix_val <= bt.V2_VIX_MAX):
-                    self.sig_info["filter_reason"] = f"VIX {vix_val} outside {bt.V2_VIX_MIN}–{bt.V2_VIX_MAX}"
-                    return None, vix_val
-
-        # Today's candles (NIFTYBEES for indicators)
-        if df_nbees is None or df_nbees.empty or not isinstance(df_nbees.index, pd.DatetimeIndex):
-            self.sig_info["filter_reason"] = "Data fetch error — bad index (RangeIndex)"
-            return None, vix_val
-        # Use all available history (prev days + today) to warm up EMA/RSI/Supertrend
-        # so signals can fire from the first candle of the day. VWAP and vol MA
-        # are inherently daily and stay today-only.
-        all_5m = df_nbees[df_nbees.index.date <= today].between_time("09:15", "15:30")
-        sday   = all_5m[all_5m.index.date == today]
-        if sday.empty:
-            self.sig_info["filter_reason"] = "No candles for today yet"
-            return None, vix_val
-
-        # Loss cooldown: decrement remaining-candle counters once per newly
-        # observed closed candle (not once per poll, which can be more frequent).
-        if self.loss_cooldown_candles > 0:
-            cur_candle_ts = sday.index[-1]
-            if cur_candle_ts != self._cooldown_last_ts:
-                for _d in ("buy", "sell"):
-                    if self._cooldown_remaining[_d] > 0:
-                        self._cooldown_remaining[_d] -= 1
-                self._cooldown_last_ts = cur_candle_ts
-
-        # Time window check — Tuesday (expiry): morning only, afternoon blocked (theta decay)
-        ts            = now.strftime("%H:%M")
-        is_expiry_day = today.weekday() == bt.V2_EXPIRY_WEEKDAY
-        in_morning    = bt.V2_NO_ENTRY_BEFORE <= ts <= bt.V2_MORNING_END
-        in_afternoon  = (bt.V2_AFTERNOON_START <= ts < bt.NO_ENTRY_AFTER) and not is_expiry_day
-        if not (in_morning or in_afternoon):
-            reason = "Tuesday expiry — afternoon blocked (theta too high)" if is_expiry_day and ts >= bt.V2_AFTERNOON_START \
-                     else f"Outside trading window ({bt.V2_NO_ENTRY_BEFORE}–{bt.V2_MORNING_END} / {bt.V2_AFTERNOON_START}–{bt.NO_ENTRY_AFTER})"
-            self.sig_info["filter_reason"] = reason
-            return None, vix_val
-
-        # Prev close
-        prev_rows = (df_1d[df_1d.index.date < today]
-                     if df_1d is not None and not df_1d.empty
-                     and isinstance(df_1d.index, pd.DatetimeIndex)
-                     else pd.DataFrame())
-        if prev_rows.empty:
-            self.sig_info["filter_reason"] = "No prev-day data"
-            return None, vix_val
-
-        # Compute indicators — EMA/RSI/Supertrend run on multi-day history so
-        # they arrive pre-warmed; extract today's slice for signal reads.
-        # VWAP and vol MA reset each day and stay today-only.
-        vwap_s   = bt._vwap(sday)
-        _prev_v  = df_nbees[df_nbees.index.date < today].between_time("09:15", "15:30").tail(20)
-        if not _prev_v.empty:
-            _vbase = pd.concat([_prev_v, sday])
-            _vm    = _vbase["Volume"].rolling(20, min_periods=5).mean()
-            vol_ma = pd.Series(_vm.values[len(_prev_v):], index=sday.index)
-        else:
-            vol_ma = sday["Volume"].rolling(20, min_periods=5).mean()
-        ema_f   = all_5m["Close"].ewm(span=bt.V2_EMA_FAST, adjust=False).mean().loc[sday.index]
-        ema_s   = all_5m["Close"].ewm(span=bt.V2_EMA_SLOW, adjust=False).mean().loc[sday.index]
-        rsi_s   = bt._rsi(all_5m["Close"], bt.V2_RSI_PERIOD).loc[sday.index]
-        st_s    = bt._supertrend(all_5m, bt.V2_ST_PERIOD, bt.V2_ST_MULT).loc[sday.index]
-        adx_s   = bt._adx(all_5m, bt.V2_ADX_PERIOD).loc[sday.index]
-
-        bnf_day  = (df_bnf[df_bnf.index.date == today].between_time("09:15", "15:30")
-                    if df_bnf is not None and not df_bnf.empty
-                    and isinstance(df_bnf.index, pd.DatetimeIndex)
-                    else pd.DataFrame())
-        has_bnf  = not bnf_day.empty and bnf_day["Volume"].sum() > 0
-        bnf_vwap = bt._vwap(bnf_day) if has_bnf else None
-
-        i   = len(sday) - 1
-        row = sday.iloc[i]
-        cl  = float(row["Close"]);  op  = float(row["Open"])
-        vol = float(row["Volume"]); vw  = float(vwap_s.iloc[i])
-        ef  = float(ema_f.iloc[i]); es  = float(ema_s.iloc[i])
-        vm  = float(vol_ma.iloc[i]) if not np.isnan(vol_ma.iloc[i]) else 0.0
-        rsi = float(rsi_s.iloc[i])  if not np.isnan(rsi_s.iloc[i])  else 50.0
-        st  = int(st_s.iloc[i])
-        adx = float(adx_s.iloc[i])  if not np.isnan(adx_s.iloc[i])  else 0.0
-
-        if has_bnf and bnf_vwap is not None and len(bnf_day) > i:
-            bnf_cl   = float(bnf_day.iloc[i]["Close"])
-            bnf_vw   = float(bnf_vwap.iloc[i])
-            bnf_bull = bnf_cl > bnf_vw;  bnf_bear = bnf_cl < bnf_vw
-        else:
-            bnf_bull = bnf_bear = True
-
-        # Volume-surge requirement removed (2026-07-14 finding): it disproportionately
-        # caught capitulation/climax candles rather than genuine trend starts —
-        # validated over 30/60-day backtests to improve trade count and P&L.
-        raw_buy  = (cl > vw and cl > ef and cl > es and cl > op
-                    and rsi > bt.V2_RSI_MIN_CE and bnf_bull and st == 1)
-        raw_sell = (cl < vw and cl < ef and cl < es and cl < op
-                    and rsi < bt.V2_RSI_MAX_PE and bnf_bear and st == -1)
-
-        # ADX regime filter: only enter when the market is actually trending
-        # (ADX > V2_ADX_MIN) — skips choppy/range-bound conditions where the
-        # other 7 conditions can still align by noise.
-        adx_blocked = adx <= bt.V2_ADX_MIN and (raw_buy or raw_sell)
-        if adx_blocked:
-            if raw_buy:
-                logger.info(f"Signal check: BUY_CE suppressed — ADX {adx:.1f} <= {bt.V2_ADX_MIN} (choppy regime)")
-            if raw_sell:
-                logger.info(f"Signal check: BUY_PE suppressed — ADX {adx:.1f} <= {bt.V2_ADX_MIN} (choppy regime)")
-            raw_buy  = False
-            raw_sell = False
-
-        # Move-from-open filter: skip if the bulk of the move already happened
-        day_open_s = float(sday.iloc[0]["Open"]) if not sday.empty else 0.0
-        if day_open_s > 0 and bt.V2_MAX_FROM_OPEN_PCT > 0:
-            if raw_buy  and (cl - day_open_s) / day_open_s * 100 > bt.V2_MAX_FROM_OPEN_PCT:
-                self.sig_info["filter_reason"] = f"Move filter: already up {(cl-day_open_s)/day_open_s*100:.2f}% from open"
-                raw_buy = False
-            if raw_sell and (day_open_s - cl) / day_open_s * 100 > bt.V2_MAX_FROM_OPEN_PCT:
-                self.sig_info["filter_reason"] = f"Move filter: already down {(day_open_s-cl)/day_open_s*100:.2f}% from open"
-                raw_sell = False
-
-        # Loss cooldown: after a losing exit, block re-entry in that same
-        # direction for loss_cooldown_candles closed candles (0 = disabled).
-        cooldown_block_buy  = self.loss_cooldown_candles > 0 and self._cooldown_remaining["buy"]  > 0
-        cooldown_block_sell = self.loss_cooldown_candles > 0 and self._cooldown_remaining["sell"] > 0
-        if raw_buy and cooldown_block_buy:
-            logger.info(f"Signal check: BUY_CE suppressed — loss cooldown "
-                        f"({self._cooldown_remaining['buy']} candle(s) remaining)")
-            raw_buy = False
-        if raw_sell and cooldown_block_sell:
-            logger.info(f"Signal check: BUY_PE suppressed — loss cooldown "
-                        f"({self._cooldown_remaining['sell']} candle(s) remaining)")
-            raw_sell = False
-
-        # Build human-readable reason for dashboard when no signal fires
-        if not raw_buy and not raw_sell:
-            if cooldown_block_buy or cooldown_block_sell:
-                sides = []
-                if cooldown_block_buy:  sides.append(f"CE ({self._cooldown_remaining['buy']} left)")
-                if cooldown_block_sell: sides.append(f"PE ({self._cooldown_remaining['sell']} left)")
-                self.sig_info["filter_reason"] = "Loss cooldown active — " + ", ".join(sides)
-            elif adx_blocked:
-                self.sig_info["filter_reason"] = f"ADX {adx:.1f} <= {bt.V2_ADX_MIN} (choppy regime)"
-            else:
-                reasons = []
-                if not (cl > vw):      reasons.append(f"Close({cl:.2f})<VWAP({vw:.2f})")
-                if not (cl > ef):      reasons.append(f"Close<EMA9({ef:.2f})")
-                if not (cl > es):      reasons.append(f"Close<EMA20({es:.2f})")
-                if rsi <= bt.V2_RSI_MIN_CE and rsi >= bt.V2_RSI_MAX_PE:
-                    reasons.append(f"RSI({rsi:.0f}) neutral")
-                if st != 1 and st != -1:  reasons.append("ST neutral")
-                self.sig_info["filter_reason"] = ", ".join(reasons) if reasons else "Conditions not met"
-
-        signal = None
-        if raw_buy  and self.last_signal != "buy":
-            signal = "BUY_CE"
-            self.sig_info["filter_reason"] = None
-        elif raw_sell and self.last_signal != "sell":
-            signal = "BUY_PE"
-            self.sig_info["filter_reason"] = None
-        elif raw_buy or raw_sell:
-            self.sig_info["filter_reason"] = "Dedup — same direction already traded"
-
-        return signal, vix_val
+        return self._check_signal_supertrend(df_nbees)
 
     # ── Order placement ───────────────────────────────────────────
 
@@ -1579,15 +1325,10 @@ class AngelTrader:
             self.position  = _empty_pos()
             self.last_signal = None
             if not is_test and self.loss_cooldown_candles > 0 and total_trade_pnl < 0:
-                if self.strategy == "supertrend":
-                    # Global cooldown: a loss blocks BOTH directions, since
-                    # V2's same-direction-only cooldown wouldn't have stopped
-                    # the 2026-08-25 PE-stop-then-CE-whipsaw pattern.
-                    self._cooldown_remaining["buy"]  = self.loss_cooldown_candles
-                    self._cooldown_remaining["sell"] = self.loss_cooldown_candles
-                else:
-                    direction = "buy" if pos["side"] == "CE" else "sell"
-                    self._cooldown_remaining[direction] = self.loss_cooldown_candles
+                # Global cooldown: a loss blocks BOTH directions — added after
+                # the 2026-08-25 PE-stop-then-CE-whipsaw incident.
+                self._cooldown_remaining["buy"]  = self.loss_cooldown_candles
+                self._cooldown_remaining["sell"] = self.loss_cooldown_candles
 
         if not is_test and self.loss_cooldown_candles > 0 and total_trade_pnl < 0:
             logger.warning(f"Loss cooldown: blocking new {pos['side']} entries for "
@@ -1915,169 +1656,7 @@ class AngelTrader:
             self._exit("EOD_SQUAREOFF")
             return
 
-        if self.strategy == "supertrend":
-            self._manage_position_supertrend(pos)
-            return
-
-        tok  = pos["token"]
-        tick = self._tick_ltp.get(tok)
-        if tick and (time.monotonic() - tick[1]) < _TICK_STALE_SECS:
-            ltp = tick[0]
-        else:
-            ltp = self.get_option_ltp(pos["symbol"], tok)
-        if ltp is None:
-            return
-
-        pnl_pu  = ltp - pos["entry_price"]
-        opt_pct = pnl_pu / pos["entry_price"] if pos["entry_price"] > 0 else 0
-
-        # Update live P&L display
-        with self._lock:
-            self.position["live_ltp"] = round(ltp, 2)
-            self.position["live_pnl"] = round(pnl_pu * pos["qty"], 2)
-
-        # User-set manual target — checked alongside every other exit rule
-        # below, not instead of them; whichever condition hits first wins.
-        if self.manual_target_pct and opt_pct >= self.manual_target_pct:
-            self._exit("MANUAL_TARGET", ltp)
-            return
-
-        is_one_lot  = pos.get("initial_qty", pos["qty"]) == bt.LOT_SIZE
-        entry_time  = pos.get("entry_time", "00:00") or "00:00"
-        late_entry  = entry_time >= "14:30"
-
-        # 1-lot: exit at +10% OR ₹1,100 — whichever comes first (only if V2_1LOT_HARD_TP).
-        # Validated default (False): skip the hard cap and let the trailing stop
-        # below (activates @V2_TRAIL_TRIGGER, floor @breakeven) manage the exit
-        # instead — backtested to turn -Rs.34,059 into +Rs.1,046 over 138 days.
-        if is_one_lot and bt.V2_1LOT_HARD_TP:
-            abs_pnl = (ltp - pos["entry_price"]) * bt.LOT_SIZE
-            if opt_pct >= bt.V2_1LOT_TP_PCT or abs_pnl >= bt.V2_1LOT_TP_RUPEES:
-                self._exit("TARGET", ltp)
-                return
-
-        # 2-lot late entry (after 14:30): full exit at +10% — no time to run to +20%
-        if (not is_one_lot
-                and late_entry
-                and opt_pct >= bt.V2_PARTIAL_PCT):
-            self._exit("TARGET_LATE", ltp)
-            return
-
-        # 2-lot normal: partial exit at +10%
-        if (not is_one_lot
-                and not pos["partial_done"]
-                and opt_pct >= bt.V2_PARTIAL_PCT
-                and pos["qty"] >= bt.LOT_SIZE * 2):
-            self._partial_exit(ltp)
-
-        # Trail activation
-        if not pos["trail_on"] and opt_pct >= bt.V2_TRAIL_TRIGGER:
-            with self._lock:
-                self.position["trail_on"]   = True
-                self.position["trail_high"] = ltp
-
-        if pos["trail_on"]:
-            with self._lock:
-                if ltp > pos["trail_high"]:
-                    self.position["trail_high"] = ltp
-
-        # After partial, SL steps to breakeven (trail_floor = 0%).
-        # Big-winner lock: once peak gain reaches V2_TRAIL_LOCK_TRIGGER, the floor
-        # ratchets up with the peak instead of sitting flat at breakeven — stops a
-        # large spike from fully round-tripping back to a loss before EMA9 flips.
-        base_floor  = bt.V2_TRAIL_FLOOR if pos["partial_done"] else 0.0
-        peak_pct    = (pos["trail_high"] - pos["entry_price"]) / pos["entry_price"] if pos["entry_price"] > 0 else 0.0
-        if peak_pct >= bt.V2_TRAIL_LOCK_TRIGGER:
-            trail_floor = max(base_floor, peak_pct - bt.V2_TRAIL_LOCK_GIVEBACK)
-        else:
-            trail_floor = base_floor
-        trail_exit  = pos["trail_on"] and opt_pct <= trail_floor
-
-        # ── Spot-based SL (two-tier) ──────────────────────────────────────────
-        # Small breach (WARN pts): market may be consolidating — wait 2 polls.
-        # Large breach (HARD pts): genuine reversal — exit immediately, no wait.
-        current_spot = self.get_nifty_ltp()
-        entry_spot   = pos.get("entry_spot", 0.0)
-        spot_move    = None   # populated below; read later by the EMA-confirm backstop check
-        against      = False
-        if current_spot and entry_spot:
-            spot_move = abs(current_spot - entry_spot)
-            against   = ((pos["side"] == "PE" and current_spot > entry_spot) or
-                         (pos["side"] == "CE" and current_spot < entry_spot))
-            if against:
-                if spot_move >= bt.V2_SPOT_SL_HARD:
-                    # Big move — exit right now, no confirmation needed
-                    self._exit("SPOT_SL_HARD", ltp)
-                    return
-                elif spot_move >= bt.V2_SPOT_SL_WARN:
-                    # Small breach — need 2 consecutive polls to confirm
-                    with self._lock:
-                        self.position["spot_sl_warn_count"] = pos.get("spot_sl_warn_count", 0) + 1
-                    if pos.get("spot_sl_warn_count", 0) + 1 >= 2:
-                        self._exit("SPOT_SL", ltp)
-                        return
-                else:
-                    with self._lock:
-                        self.position["spot_sl_warn_count"] = 0
-            else:
-                with self._lock:
-                    self.position["spot_sl_warn_count"] = 0
-
-        # ── Premium backstop (two-tier) ───────────────────────────────────────
-        # Hard stop (-20%): immediate exit — no waiting.
-        # Warning zone (-13%): 2 polls needed — filters slow theta bleed.
-        if opt_pct <= -bt.V2_SL_OPTION_PCT:
-            self._exit("SL_HARD", ltp)
-            return
-
-        sl_triggered = False
-        if opt_pct <= -bt.V2_SL_WARN_PCT:
-            with self._lock:
-                self.position["sl_warn_count"] = pos["sl_warn_count"] + 1
-            if pos["sl_warn_count"] + 1 >= 2:
-                sl_triggered = True
-        else:
-            with self._lock:
-                self.position["sl_warn_count"] = 0
-
-        # EMA9 exit: underlying closed back through EMA9 against the position,
-        # confirmed over bt.V2_EMA_EXIT_CONFIRM_CANDLES consecutive CLOSED
-        # candles (matches backtest.py's ema_exit_confirm mechanism). A candle
-        # that moves back in the position's favor resets the counter to 0 —
-        # this is a streak, not a rolling window. Counted once per newly
-        # closed candle (via the "ts" on self._ema_ref), not once per poll —
-        # _manage_position runs every 5s but the underlying candle only
-        # advances once every 5 minutes.
-        ema_exit = False
-        ema_ts   = self._ema_ref.get("ts")
-        if self._ema_ref.get("ema9") is not None and ema_ts is not None:
-            ema_breach = ((pos["side"] == "CE" and self._ema_ref["close"] < self._ema_ref["ema9"]) or
-                          (pos["side"] == "PE" and self._ema_ref["close"] > self._ema_ref["ema9"]))
-            if ema_ts != pos.get("ema_last_candle_ts"):
-                with self._lock:
-                    self.position["ema_warn_count"] = (pos.get("ema_warn_count", 0) + 1) if ema_breach else 0
-                    self.position["ema_last_candle_ts"] = ema_ts
-            ema_exit = pos.get("ema_warn_count", 0) >= bt.V2_EMA_EXIT_CONFIRM_CANDLES
-
-        # EMA-confirm hard backstop: while inside the confirm waiting window
-        # (breach counter > 0 but hasn't reached V2_EMA_EXIT_CONFIRM_CANDLES
-        # yet), a fast adverse spot move overrides the wait and exits
-        # immediately — checked every 5s poll via the same live spot read
-        # above, since the whole point is reacting faster than a candle close.
-        ema_warn_count = pos.get("ema_warn_count", 0)
-        ema_backstop = (bt.V2_EMA_CONFIRM_BACKSTOP_PTS > 0
-                        and 0 < ema_warn_count < bt.V2_EMA_EXIT_CONFIRM_CANDLES
-                        and against and spot_move is not None
-                        and spot_move > bt.V2_EMA_CONFIRM_BACKSTOP_PTS)
-        if ema_backstop:
-            logger.info(f"EMA-confirm backstop: spot moved {spot_move:.1f}pts against {pos['side']} "
-                       f"while awaiting confirmation ({ema_warn_count}/{bt.V2_EMA_EXIT_CONFIRM_CANDLES})")
-
-        if   opt_pct >= bt.V2_TP_OPTION_PCT and not is_one_lot: self._exit("TARGET",     ltp)
-        elif sl_triggered:                                       self._exit("SL",         ltp)
-        elif trail_exit:                                         self._exit("TRAIL_EXIT", ltp)
-        elif ema_exit:                                           self._exit("EMA_EXIT",   ltp)
-        elif ema_backstop:                                       self._exit("EMA_EXIT_BACKSTOP", ltp)
+        self._manage_position_supertrend(pos)
 
     def _manage_position_supertrend(self, pos):
         """
@@ -2238,10 +1817,10 @@ class AngelTrader:
                         try:
                             self.get_balance()
                             self.get_nifty_ltp()
-                            df_nbees, df_1d, df_bnf, df_vix = self._fetch_live_data()
-                            signal, vix = self._check_signal(df_nbees, df_1d, df_bnf, df_vix)
+                            df_nbees = self._fetch_nbees_only()
+                            signal = self._check_signal(df_nbees)
 
-                            self.sig_info.update({"signal": signal, "vix": vix})
+                            self.sig_info.update({"signal": signal})
                             self.last_error = None  # clear old errors on success
 
                             if signal:
@@ -2273,16 +1852,9 @@ class AngelTrader:
                     # Activity" doesn't go silent for the whole life of a trade.
                     try:
                         df_nbees = self._fetch_nbees_only()
-                        trend = None
-                        if self.strategy == "supertrend":
-                            self._update_st_ref(df_nbees)
-                            st_val = self._st_ref.get("value")
-                            trend = "Uptrend" if st_val == 1 else "Downtrend" if st_val == -1 else None
-                        else:
-                            self._update_ema_ref(df_nbees)
-                            ema = self._ema_ref
-                            if ema.get("close") is not None and ema.get("ema9") is not None:
-                                trend = "Uptrend" if ema["close"] > ema["ema9"] else "Downtrend"
+                        self._update_st_ref(df_nbees)
+                        st_val = self._st_ref.get("value")
+                        trend = "Uptrend" if st_val == 1 else "Downtrend" if st_val == -1 else None
 
                         pcr = self.get_nifty_pcr()
                         parts = [p for p in (trend, f"PCR {pcr:.2f}" if pcr is not None else None) if p]
@@ -2323,13 +1895,12 @@ class AngelTrader:
 
     def start(self, max_trades: int = 2, lots: int = 1, paper_mode: bool = False,
              max_daily_loss: float = None, daily_profit_target: float = None,
-             strategy: str = "v2", manual_target_pct: float = None,
+             manual_target_pct: float = None,
              carry_overnight: bool = False):
         """Enable trading and launch background threads."""
         if self._obj is None:
             self.login()
 
-        self.strategy          = strategy if strategy in ("v2", "supertrend") else "v2"
         self.max_trades       = max_trades
         self.lots             = lots
         self.paper_mode       = paper_mode
@@ -2338,10 +1909,9 @@ class AngelTrader:
                                     else bt.DAILY_PROFIT_TARGET)
         self.manual_target_pct = manual_target_pct
         self.carry_overnight   = carry_overnight
-        # Supertrend uses its own global (either-direction) cooldown constant;
-        # V2 uses its validated same-direction-only cooldown.
-        self.loss_cooldown_candles = (bt.ST6_LOSS_COOLDOWN_CANDLES if self.strategy == "supertrend"
-                                      else bt.V2_LOSS_COOLDOWN_CANDLES)
+        # Global (either-direction) loss cooldown — added after the
+        # 2026-08-25 PE-stop-then-CE-whipsaw incident.
+        self.loss_cooldown_candles = bt.ST6_LOSS_COOLDOWN_CANDLES
         self.enabled          = True
         self._monitoring_only = False
 
@@ -2413,13 +1983,9 @@ class AngelTrader:
 
         if pos["active"]:
             side, ep, es = pos.get("side"), pos.get("entry_price") or 0, pos.get("entry_spot") or 0
-            if self.strategy == "supertrend":
-                spot_stop = (es - bt.ST6_SPOT_SL) if side == "CE" else (es + bt.ST6_SPOT_SL)
-                pos["stop_desc"]   = f"Spot {spot_stop:.0f} ({bt.ST6_SPOT_SL}pt)" if es else "—"
-                pos["target_desc"] = "Exit on trend flip"
-            else:
-                pos["stop_desc"]   = f"₹{ep*(1-bt.V2_SL_OPTION_PCT):.2f} (−{bt.V2_SL_OPTION_PCT*100:.0f}%)" if ep else "—"
-                pos["target_desc"] = f"₹{ep*(1+bt.V2_PARTIAL_PCT):.2f} (+{bt.V2_PARTIAL_PCT*100:.0f}%)" if ep else "—"
+            spot_stop = (es - bt.ST6_SPOT_SL) if side == "CE" else (es + bt.ST6_SPOT_SL)
+            pos["stop_desc"]   = f"Spot {spot_stop:.0f} ({bt.ST6_SPOT_SL}pt)" if es else "—"
+            pos["target_desc"] = "Exit on trend flip"
 
         return {
             "status"      : status,
@@ -2428,9 +1994,11 @@ class AngelTrader:
             "monitoring"  : self._monitoring_only,
             "paper_mode"  : self.paper_mode,
             "config"      : {"max_trades": self.max_trades, "lots": self.lots, "paper": self.paper_mode,
-                             "strategy": self.strategy, "lot_size": bt.LOT_SIZE,
-                             "max_manual_add_lots": MAX_MANUAL_ADD_LOTS},
-            "market"      : {"nifty_ltp": self.nifty_ltp, "vix": self.sig_info.get("vix"),
+                             "lot_size": bt.LOT_SIZE,
+                             "max_manual_add_lots": MAX_MANUAL_ADD_LOTS,
+                             "manual_target_pct": round(self.manual_target_pct * 100, 2) if self.manual_target_pct else None,
+                             "carry_overnight": self.carry_overnight},
+            "market"      : {"nifty_ltp": self.nifty_ltp,
                              "st_trend": self._st_ref.get("value")},
             "signal"      : self.sig_info,
             "position"    : pos,
