@@ -1671,16 +1671,14 @@ class AngelTrader:
             Chosen over the higher-EV "32%-only" version for the loss
             guarantee below 32% — backtested 45d (Aug 2026): Rs.43,905 vs
             Rs.33,562 doing nothing (Rs.51,905 for 32%-only, no guarantee);
-        (3) Supertrend flip against the position;
-        (4) Still down at least ST6_NEG_REVERSAL_LOSS_PCT, ST6_NEG_REVERSAL_AGE_MIN
-            minutes after entry -> NEG_REVERSAL_EXIT, cut and stay flat (no
-            re-entry into the opposite side).
-            The auto-flip into the opposite side at the same strike was removed
-            2026-09-12: live it fired twice (2026-09-04, 2026-09-11) and lost
-            both times (-767 EOD square-off, -4,634.5 ST_SPOT_SL), turning a
-            -929.5/-695.5 cut into a -1,696.5/-5,330 day. The backtest premise
-            behind it (Aug19-Sep1 2026 sample: -Rs.11,482 into +Rs.6,825) did
-            not hold up on the trades that actually triggered it live.
+        (3) Supertrend flip against the position.
+        NEG_REVERSAL_EXIT (the 20min/5% early-cut rule, added Sep 2026) was
+        removed entirely 2026-09-12: a 40-day backtest of the current live
+        rules (auto-flip already stripped per the 2026-09-12 fix above) showed
+        it was still the single biggest loss line item -- 25 of 49 trades,
+        net -Rs.37,966.80 -- outweighing SPOT_SL (-Rs.3,312) and any benefit
+        it was meant to provide. Back to the original Strategy 6 exit set:
+        SPOT_SL, 3-tier trail, ST_FLIP, EOD square-off only.
         EOD square-off is handled by the shared check in _manage_position
         before this is called.
         """
@@ -1711,15 +1709,6 @@ class AngelTrader:
                       else current_spot - entry_spot)
             if adverse >= bt.ST6_SPOT_SL:
                 self._exit("ST_SPOT_SL", ltp)
-                return
-
-        entry_time_str = pos.get("entry_time")
-        if not pos.get("is_reversal") and ltp is not None and entry_time_str:
-            entry_dt = datetime.combine(_today(), datetime.strptime(entry_time_str, "%H:%M").time())
-            age_min  = (_now() - entry_dt).total_seconds() / 60
-            if (age_min >= bt.ST6_NEG_REVERSAL_AGE_MIN and
-                    ltp <= pos["entry_price"] * (1 - bt.ST6_NEG_REVERSAL_LOSS_PCT)):
-                self._exit("NEG_REVERSAL_EXIT", ltp)
                 return
 
         entry = pos["entry_price"]
