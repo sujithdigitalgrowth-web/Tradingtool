@@ -1673,19 +1673,14 @@ class AngelTrader:
             Rs.33,562 doing nothing (Rs.51,905 for 32%-only, no guarantee);
         (3) Supertrend flip against the position;
         (4) Still down at least ST6_NEG_REVERSAL_LOSS_PCT, ST6_NEG_REVERSAL_AGE_MIN
-            minutes after entry -> NEG_REVERSAL_EXIT, cut and immediately flip
-            into the opposite side at the same strike.
-            Original 10min/any-negative rule backtested Aug19-Sep1 2026 (18 real
-            trades, real option prices): every trade still negative at +10min
-            went on to lose (8/8 and 6/7 across two windows, never recovered)
-            and the reversal -- managed by these same rules -- turned
-            -Rs.11,482 into +Rs.6,825 on the subset that triggered it.
-            45d grid search (Sep 2026) across age x loss-pct settled on
-            20min/5%: matches 10min/5%'s net P&L (Rs.54,101 vs Rs.55,059) while
-            roughly halving max drawdown (Rs.-6,357 vs Rs.-11,294) -- see
-            ST6_NEG_REVERSAL_AGE_MIN in backtest.py. Never chains a second
-            reversal, and skips the flip (still cuts, just no re-entry) within
-            30min of square-off or once the day's trade/loss caps are already hit.
+            minutes after entry -> NEG_REVERSAL_EXIT, cut and stay flat (no
+            re-entry into the opposite side).
+            The auto-flip into the opposite side at the same strike was removed
+            2026-09-12: live it fired twice (2026-09-04, 2026-09-11) and lost
+            both times (-767 EOD square-off, -4,634.5 ST_SPOT_SL), turning a
+            -929.5/-695.5 cut into a -1,696.5/-5,330 day. The backtest premise
+            behind it (Aug19-Sep1 2026 sample: -Rs.11,482 into +Rs.6,825) did
+            not hold up on the trades that actually triggered it live.
         EOD square-off is handled by the shared check in _manage_position
         before this is called.
         """
@@ -1724,14 +1719,7 @@ class AngelTrader:
             age_min  = (_now() - entry_dt).total_seconds() / 60
             if (age_min >= bt.ST6_NEG_REVERSAL_AGE_MIN and
                     ltp <= pos["entry_price"] * (1 - bt.ST6_NEG_REVERSAL_LOSS_PCT)):
-                reversal_signal = "BUY_PE" if pos["side"] == "CE" else "BUY_CE"
-                strike = pos["strike"]
                 self._exit("NEG_REVERSAL_EXIT", ltp)
-                too_late = _now().strftime("%H:%M") >= "14:45"
-                caps_hit = (self.trade_count >= self.max_trades or
-                           self.daily_pnl <= self.max_daily_loss)
-                if not too_late and not caps_hit:
-                    self._enter(reversal_signal, force_strike=strike, is_reversal=True)
                 return
 
         entry = pos["entry_price"]
