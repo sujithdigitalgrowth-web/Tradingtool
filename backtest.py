@@ -88,6 +88,17 @@ ST6_LOSS_COOLDOWN_CANDLES = 3  # after ANY losing exit, block new entries in EIT
                                  # --global: 3 candles costs ~Rs.13,200/45d vs no cooldown
                                  # (Rs.27,691 vs Rs.40,935) but was chosen deliberately for
                                  # the whipsaw protection over the higher-EV uncapped version.
+ST6_MAX_PRE_MOVE = 8  # points -- skip a Supertrend-flip entry if Nifty already moved
+                       # more than this in the single 5-min candle immediately before
+                       # it (the entry candle's own close-to-close move). Added
+                       # 2026-09-13: a chasing entry right after an already-large move
+                       # is the strategy's weakest pattern (both -Rs.10k days in the
+                       # Sep 2026 sample were 3 chasing entries in a row). Compared
+                       # against 10pt on the same 40d/90d windows -- 10pt lets in 3-5
+                       # more trades but they net -Rs.2,759 combined (mostly losses),
+                       # so 8pt was chosen: same or better net P&L and peak equity on
+                       # both windows, for a marginally deeper (but still far smaller
+                       # than uncapped) drawdown. None disables the filter entirely.
 
 # ── V2 Strategy constants ─────────────────────────────────────────
 V2_TP_OPTION_PCT   = 0.20   # 2-lot: remaining lot hard TP at +20%

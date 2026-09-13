@@ -911,10 +911,17 @@ class AngelTrader:
             if len(all_5m) < bt.ST6_PERIOD + 2:
                 return
             st_s = bt._supertrend(all_5m, bt.ST6_PERIOD, bt.ST6_MULT)
+            # Move in the latest closed (entry) candle itself, i.e. how far Nifty
+            # already ran before this candle's close -- None on a day's first
+            # candle (nothing to compare against within the same session).
+            pre_move = None
+            if all_5m.index[-1].date() == all_5m.index[-2].date():
+                pre_move = float(all_5m["Close"].iloc[-1] - all_5m["Close"].iloc[-2])
             self._st_ref = {
                 "value": int(st_s.iloc[-1]),
                 "prev":  int(st_s.iloc[-2]),
                 "ts":    st_s.index[-1],
+                "pre_move": pre_move,
             }
         except Exception as e:
             logger.warning(f"Supertrend ref update failed: {e}")
@@ -929,6 +936,12 @@ class AngelTrader:
         --cooldown-sweep --global. Flip Red(-1)->Green(1) => BUY_CE. Flip
         Green(1)->Red(-1) => BUY_PE. Matches supertrend_45day_sl_backtest.py
         exactly, plus the cooldown.
+
+        Also skips the flip if Nifty already moved more than ST6_MAX_PRE_MOVE
+        points in the entry candle itself — added 2026-09-13 after the 40d/90d
+        backtest showed chasing an already-large move right before entry was
+        the strategy's single weakest pattern (see ST6_MAX_PRE_MOVE in
+        backtest.py for the full comparison against the 10pt alternative).
         """
         self._update_st_ref(df_nbees)
         value, prev = self._st_ref.get("value"), self._st_ref.get("prev")
@@ -948,20 +961,24 @@ class AngelTrader:
         cooling = self.loss_cooldown_candles > 0 and (
             self._cooldown_remaining["buy"] > 0 or self._cooldown_remaining["sell"] > 0)
 
-        if value == 1 and prev == -1:
-            if cooling:
-                self.sig_info["filter_reason"] = f"Loss cooldown active ({max(self._cooldown_remaining.values())} candle(s) left)"
-                return None
-            self.sig_info["filter_reason"] = None
-            return "BUY_CE"
-        if value == -1 and prev == 1:
-            if cooling:
-                self.sig_info["filter_reason"] = f"Loss cooldown active ({max(self._cooldown_remaining.values())} candle(s) left)"
-                return None
-            self.sig_info["filter_reason"] = None
-            return "BUY_PE"
-        self.sig_info["filter_reason"] = f"Supertrend {'up' if value == 1 else 'down'} — no flip"
-        return None
+        flip = "BUY_CE" if (value == 1 and prev == -1) else "BUY_PE" if (value == -1 and prev == 1) else None
+        if flip is None:
+            self.sig_info["filter_reason"] = f"Supertrend {'up' if value == 1 else 'down'} — no flip"
+            return None
+
+        if cooling:
+            self.sig_info["filter_reason"] = f"Loss cooldown active ({max(self._cooldown_remaining.values())} candle(s) left)"
+            return None
+
+        pre_move = self._st_ref.get("pre_move")
+        if (bt.ST6_MAX_PRE_MOVE is not None and pre_move is not None
+                and abs(pre_move) > bt.ST6_MAX_PRE_MOVE):
+            self.sig_info["filter_reason"] = (f"Skipped — Nifty already moved {pre_move:+.1f}pt in the "
+                                               f"entry candle (>{bt.ST6_MAX_PRE_MOVE}pt cap)")
+            return None
+
+        self.sig_info["filter_reason"] = None
+        return flip
 
     def _check_signal(self, df_nbees):
         """
