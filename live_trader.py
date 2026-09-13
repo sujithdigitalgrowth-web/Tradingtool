@@ -963,7 +963,7 @@ class AngelTrader:
 
         flip = "BUY_CE" if (value == 1 and prev == -1) else "BUY_PE" if (value == -1 and prev == 1) else None
         if flip is None:
-            self.sig_info["filter_reason"] = f"Supertrend {'up' if value == 1 else 'down'} — no flip"
+            self.sig_info["filter_reason"] = f"Artha Trend {'up' if value == 1 else 'down'} — no flip"
             return None
 
         if cooling:

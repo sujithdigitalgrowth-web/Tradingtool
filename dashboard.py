@@ -672,7 +672,7 @@ TEMPLATE = r"""
         <h1 class="text-xl font-extrabold text-gray-900 tracking-tight">ARTHA BOT</h1>
         <span id="status-badge" class="badge-stop text-xs font-bold px-3 py-1 rounded-full">STOPPED</span>
       </div>
-      <p id="hero-subtitle" class="text-xs text-gray-500 mt-1">Supertrend Strategy &middot; Nifty 50 Options</p>
+      <p id="hero-subtitle" class="text-xs text-gray-500 mt-1">Artha Trend Strategy &middot; Nifty 50 Options</p>
 
       <div class="flex gap-2 mt-4 flex-wrap">
         <button id="btn-start" onclick="openStartModal()"
@@ -698,7 +698,7 @@ TEMPLATE = r"""
       </div>
       <div class="flex items-center gap-2 mt-2">
         <span id="paper-badge" class="hidden text-xs font-bold px-3 py-1 rounded-full bg-blue-100 text-blue-700">PAPER</span>
-        <span id="strategy-badge" class="text-xs font-bold px-3 py-1 rounded-full bg-violet-100 text-violet-700">SUPERTREND</span>
+        <span id="strategy-badge" class="text-xs font-bold px-3 py-1 rounded-full bg-violet-100 text-violet-700">ARTHA TREND</span>
       </div>
 
       <div class="mt-4">
@@ -793,7 +793,7 @@ TEMPLATE = r"""
         <div class="space-y-2 text-xs">
           <div class="flex justify-between gap-2"><span class="text-gray-400 shrink-0">Last Signal</span>
             <span id="bs-last-signal" class="font-semibold text-gray-700 text-right">—</span></div>
-          <div class="flex justify-between gap-2"><span class="text-gray-400 shrink-0" id="bs-indicator-label">Supertrend</span>
+          <div class="flex justify-between gap-2"><span class="text-gray-400 shrink-0" id="bs-indicator-label">Artha Trend</span>
             <span id="bs-indicator" class="font-semibold text-gray-700 text-right">—</span></div>
           <div class="flex justify-between gap-2"><span class="text-gray-400 shrink-0">Next Check</span>
             <span id="bs-countdown" class="font-mono font-semibold text-violet-700">—</span></div>
@@ -1403,7 +1403,7 @@ function refreshLive(){
     // Bot Status: last signal, indicator, filter/error
     const bsLabel = document.getElementById('bs-indicator-label');
     const bsInd   = document.getElementById('bs-indicator');
-    bsLabel.textContent = 'Supertrend';
+    bsLabel.textContent = 'Artha Trend';
     if(mkt.st_trend === 1)       { bsInd.textContent = 'Uptrend ▲';   bsInd.className = 'font-semibold text-green-600 text-right'; }
     else if(mkt.st_trend === -1) { bsInd.textContent = 'Downtrend ▼'; bsInd.className = 'font-semibold text-red-600 text-right'; }
     else                         { bsInd.textContent = '—';           bsInd.className = 'font-semibold text-gray-700 text-right'; }
