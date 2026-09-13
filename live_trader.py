@@ -2067,6 +2067,8 @@ def _empty_pos():
     }
 
 def _market_open(now: datetime) -> bool:
+    if now.weekday() >= 5:   # Saturday=5, Sunday=6 -- NSE is shut, don't trade stale quotes
+        return False
     ts = now.strftime("%H:%M")
     return MARKET_OPEN <= ts <= MARKET_CLOSE
 
