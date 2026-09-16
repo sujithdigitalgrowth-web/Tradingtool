@@ -493,6 +493,7 @@ class AngelTrader:
         self._today       = _today()
         self._consec_errors   = 0      # consecutive signal-check failures
         self._last_error_tg   = None   # datetime of last error Telegram sent
+        self._reload_today_trades()
 
         # Recent-activity feed for the dashboard — real events only (scans,
         # entries, exits), newest first, bounded so it can't grow unbounded.
@@ -2035,6 +2036,34 @@ class AngelTrader:
         }
 
     # ── Helpers ───────────────────────────────────────────────────
+
+    def _reload_today_trades(self):
+        """
+        Repopulate in-memory today's-trade state (self.trades/daily_pnl/
+        trade_count/win_count) from the persisted trade log on startup --
+        otherwise a mid-day restart (e.g. deploying a code fix) silently
+        wipes the dashboard's "today" view (Trades Today, Daily P&L, Today's
+        Trades list all read self.trades/daily_pnl/trade_count, which
+        __init__ always started at empty/zero with no reload) even though
+        the trade is still correctly on disk in TRADE_LOG_FILE. Found
+        2026-09-16 after restarting mid-session for the spot-fetch fix.
+        """
+        try:
+            if not os.path.exists(TRADE_LOG_FILE):
+                return
+            with open(TRADE_LOG_FILE) as f:
+                all_trades = json.load(f)
+            today_iso = self._today.isoformat()
+            todays = [t for t in all_trades if t.get("date") == today_iso and not t.get("is_test")]
+            self.trades      = todays
+            self.daily_pnl   = round(sum(t.get("pnl", 0.0) for t in todays), 2)
+            self.trade_count = len(todays)
+            self.win_count   = sum(1 for t in todays if t.get("pnl", 0) > 0)
+            if todays:
+                logger.info(f"Reloaded {len(todays)} trade(s) from today's log on startup "
+                           f"(daily_pnl=₹{self.daily_pnl:,.2f})")
+        except Exception as e:
+            logger.warning(f"_reload_today_trades: {e}")
 
     def _reset_day(self):
         with self._lock:
