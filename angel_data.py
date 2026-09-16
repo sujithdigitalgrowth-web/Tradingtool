@@ -5,11 +5,13 @@ Replaces Yahoo Finance for intraday data — no 58-day limit.
 Angel One note: Index tokens (Nifty 50 = 26000) require a paid historical
 data subscription. ETF tokens work on standard API.
 
-Nifty 50 proxy: NIFTYBEES × NIFTY_MULTIPLIER (88.31 ± 0.12 over Mar-May 2026).
-Verified over 37 trading days — variation <0.5% — accurate for backtesting.
+Nifty 50 proxy: NIFTYBEES × NIFTY_MULTIPLIER (87.72, recalibrated 2026-09-16;
+was 88.31 from Mar-May 2026, drifted ~0.67% since — likely a NIFTYBEES
+dividend/corporate action not reflected in the old constant. Re-check
+periodically: (real Nifty LTP) / (NIFTYBEES-EQ LTP) should track this value).
 
 Tokens (NSE):
-  NIFTYBEES : 10576   (Nifty 50 ETF  — ×88.31 = Nifty spot proxy)
+  NIFTYBEES : 10576   (Nifty 50 ETF  — ×87.72 = Nifty spot proxy)
   BANKBEES  : 11439   (Bank Nifty ETF — alignment check)
 """
 
@@ -23,7 +25,7 @@ from logzero import logger
 
 NIFTYBEES_TOKEN   = "10576"
 BANKBEES_TOKEN    = "11439"
-NIFTY_MULTIPLIER  = 88.31   # NIFTYBEES close × this ≈ Nifty 50 spot price
+NIFTY_MULTIPLIER  = 87.72   # NIFTYBEES close × this ≈ Nifty 50 spot price (recalibrated 2026-09-16)
 BANKBEES_MULTIPLIER = 100.0  # BANKBEES close × this ≈ BankNifty spot price (recalibrate if ETF drifts)
 
 CHUNK_DAYS = 60            # safe chunk size for 5m API requests

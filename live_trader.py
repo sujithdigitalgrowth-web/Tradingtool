@@ -79,6 +79,12 @@ INDEX_QUOTES = [
     ("NSE", "99926017", "INDIA VIX", "Volatility index · lower = calmer"),
 ]
 
+NIFTY_INDEX_TOKEN = "99926000"   # "NIFTY 50" index, NSE — real spot LTP, no ETF proxy needed
+                                  # (the paid-historical-data restriction only applies to
+                                  # getCandleData, not this live quote endpoint — see
+                                  # get_nifty_ltp(), and SECTOR_INDICES below already reads
+                                  # this same token successfully)
+
 # ── Sector index cards on the dashboard's "Index" tab ──────────────
 # (display name, exchange, index token, subtitle, [(stock symbol, NSE-EQ token), ...])
 #
@@ -594,13 +600,24 @@ class AngelTrader:
         return None
 
     def get_nifty_ltp(self):
+        """
+        Real NIFTY 50 index LTP — direct quote, not the NIFTYBEES ETF proxy.
+        The proxy is only needed for historical candle series (paid-subscription
+        restriction on index historical data); a single live quote for the
+        index itself has always been freely available (same endpoint already
+        used for VIX/sector index cards) and avoids the ETF-vs-index drift
+        that comes from NIFTYBEES paying periodic dividends (found 2026-09-16 —
+        NIFTY_MULTIPLIER had drifted ~0.67%/~158pt stale since its Mar-May
+        2026 calibration, silently skewing entry_spot/strike selection).
+        """
         try:
-            resp = self._obj.ltpData("NSE", "NIFTYBEES-EQ", NIFTYBEES_TOKEN)
-            ltp_val = self._extract_ltp(resp)
-            if ltp_val:
-                ltp = round(ltp_val * NIFTY_MULTIPLIER, 2)
-                self.nifty_ltp = ltp
-                return ltp
+            resp = self._obj.getMarketData("LTP", {"NSE": [NIFTY_INDEX_TOKEN]})
+            if resp and resp.get("status") and resp.get("data"):
+                fetched = resp["data"].get("fetched", [])
+                if fetched and fetched[0].get("ltp") is not None:
+                    ltp = round(float(fetched[0]["ltp"]), 2)
+                    self.nifty_ltp = ltp
+                    return ltp
         except Exception as e:
             logger.warning(f"get_nifty_ltp: {e}")
         return self.nifty_ltp
@@ -889,10 +906,18 @@ class AngelTrader:
         """
         Fetch last 12 days of NIFTYBEES 5m candles (enough for Supertrend(10,3)
         to warm up) — the only data Strategy 6's signal/exit logic needs.
+        Scaled by NIFTY_MULTIPLIER to real Nifty points — this was missing
+        (found 2026-09-16) which left ST6_MAX_PRE_MOVE (an 8-point Nifty
+        threshold) being compared against raw ETF-price deltas instead,
+        silently disabling that filter live even though backtest.py always
+        computes it correctly-scaled. Supertrend flip direction itself is
+        scale-invariant, so entry/exit timing wasn't affected — only the
+        pre-move skip was dead code.
         """
         today    = _today()
         lookback = today - timedelta(days=12)
-        return _trim_forming_candle(_fetch_intraday(self._auth, self._api_key, NIFTYBEES_TOKEN, lookback, today))
+        return _trim_forming_candle(_fetch_intraday(self._auth, self._api_key, NIFTYBEES_TOKEN,
+                                                     lookback, today, multiplier=NIFTY_MULTIPLIER))
 
     # ── Signal detection ──────────────────────────────────────────
 
