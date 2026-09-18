@@ -992,6 +992,19 @@ class AngelTrader:
             self.sig_info["filter_reason"] = f"Artha Trend {'up' if value == 1 else 'down'} — no flip"
             return None
 
+        # Only act on a flip whose candle closed in TODAY's session. At the
+        # 09:15 open the newest closed candle is still yesterday's 15:25 one;
+        # if that was a flip it was already blocked by NO_NEW_TRADE_TIME the
+        # evening before, and re-reading it here bought a stale signal at the
+        # open (2026-09-18 CE, -Rs.6,321). Backtests only ever act on a flip
+        # at its own candle close, so this keeps live matching them. The
+        # 09:15 candle's own flip (closes 09:20) is today's and still allowed.
+        flip_ts = self._st_ref.get("ts")
+        if flip_ts is not None and flip_ts.date() != _today():
+            self.sig_info["filter_reason"] = (f"Skipped — {flip} is from {flip_ts.strftime('%d %b %H:%M')}, "
+                                               f"not today's session")
+            return None
+
         if cooling:
             self.sig_info["filter_reason"] = f"Loss cooldown active ({max(self._cooldown_remaining.values())} candle(s) left)"
             return None
