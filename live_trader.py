@@ -908,7 +908,7 @@ class AngelTrader:
         Fetch last 12 days of NIFTYBEES 5m candles (enough for Supertrend(10,3)
         to warm up) — the only data Strategy 6's signal/exit logic needs.
         Scaled by NIFTY_MULTIPLIER to real Nifty points — this was missing
-        (found 2026-09-16) which left ST6_MAX_PRE_MOVE (an 8-point Nifty
+        (found 2026-09-16) which left ST6_MAX_PRE_MOVE (a Nifty-point
         threshold) being compared against raw ETF-price deltas instead,
         silently disabling that filter live even though backtest.py always
         computes it correctly-scaled. Supertrend flip direction itself is

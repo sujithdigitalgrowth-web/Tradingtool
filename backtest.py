@@ -88,7 +88,7 @@ ST6_LOSS_COOLDOWN_CANDLES = 3  # after ANY losing exit, block new entries in EIT
                                  # --global: 3 candles costs ~Rs.13,200/45d vs no cooldown
                                  # (Rs.27,691 vs Rs.40,935) but was chosen deliberately for
                                  # the whipsaw protection over the higher-EV uncapped version.
-ST6_MAX_PRE_MOVE = 8  # points -- skip a Supertrend-flip entry if Nifty already moved
+ST6_MAX_PRE_MOVE = 15 # points -- skip a Supertrend-flip entry if Nifty already moved
                        # more than this in the single 5-min candle immediately before
                        # it (the entry candle's own close-to-close move). Added
                        # 2026-09-13: a chasing entry right after an already-large move
@@ -99,6 +99,9 @@ ST6_MAX_PRE_MOVE = 8  # points -- skip a Supertrend-flip entry if Nifty already 
                        # so 8pt was chosen: same or better net P&L and peak equity on
                        # both windows, for a marginally deeper (but still far smaller
                        # than uncapped) drawdown. None disables the filter entirely.
+                       # Raised to 15pt on 2026-09-24 by user choice: 8pt blocked
+                       # the Sep 22 10:25 PE flip (pre-move -9.6pt) that would have
+                       # made ~Rs.11-14k at 5 lots. Not re-backtested at 15pt.
 
 # ── V2 Strategy constants ─────────────────────────────────────────
 V2_TP_OPTION_PCT   = 0.20   # 2-lot: remaining lot hard TP at +20%
