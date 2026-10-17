@@ -470,6 +470,7 @@ class AngelTrader:
         # can read the current flip state.
         self._st_ref = {"value": None, "prev": None, "ts": None}
         self._nbees_cache = None   # closed NIFTYBEES 5m candles, see _fetch_nbees_only
+        self._last_entry_flip_ts = None   # flip candle already traded, see _check_signal_supertrend
 
         # Config (set by start())
         self.max_trades   = 2
@@ -1040,6 +1041,15 @@ class AngelTrader:
         if flip_ts is not None and flip_ts.date() != _today():
             self.sig_info["filter_reason"] = (f"Skipped — {flip} is from {flip_ts.strftime('%d %b %H:%M')}, "
                                                f"not today's session")
+            return None
+
+        # One entry per flip, as in the backtests. Without this, a trade that
+        # exits flat/green inside its own entry candle (no loss -> no cooldown)
+        # is re-bought on the next scan, which still sees the same flip candle
+        # (happened 9 & 10 Jun 2026 under V2).
+        if flip_ts is not None and flip_ts == self._last_entry_flip_ts:
+            self.sig_info["filter_reason"] = (f"Already traded the {flip_ts.strftime('%H:%M')} {flip} flip "
+                                               f"— waiting for a new one")
             return None
 
         if cooling:
@@ -1897,7 +1907,8 @@ class AngelTrader:
 
                             if signal:
                                 logger.info(f"Signal: {signal}")
-                                self._enter(signal)
+                                if self._enter(signal):
+                                    self._last_entry_flip_ts = self._st_ref.get("ts")
                             else:
                                 self._log_activity("scan", "Market scan completed — no signal")
                         except Exception as e:
