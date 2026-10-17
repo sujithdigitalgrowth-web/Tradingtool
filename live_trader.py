@@ -2080,9 +2080,26 @@ class AngelTrader:
                              "lot_size": bt.LOT_SIZE,
                              "max_manual_add_lots": MAX_MANUAL_ADD_LOTS,
                              "manual_target_pct": round(self.manual_target_pct * 100, 2) if self.manual_target_pct else None,
-                             "carry_overnight": self.carry_overnight},
+                             "carry_overnight": self.carry_overnight,
+                             # exit rules, so the dashboard's profit ladder mirrors the live logic
+                             "spot_sl": bt.ST6_SPOT_SL,
+                             "trail_steps": [{"trigger": bt.ST6_STEP1_TRIGGER, "floor": bt.ST6_STEP1_FLOOR},
+                                             {"trigger": bt.ST6_STEP2_TRIGGER, "floor": bt.ST6_STEP2_FLOOR}],
+                             "trail_giveback": (bt.ST6_TRAIL_GIVEBACK if bt.ST6_TRAIL_GIVEBACK_ENABLED else None),
+                             "trail_lock_trigger": bt.ST6_TRAIL_LOCK_TRIGGER,
+                             "squareoff_time": SQUAREOFF_TIME},
             "market"      : {"nifty_ltp": self.nifty_ltp,
-                             "st_trend": self._st_ref.get("value")},
+                             "st_trend": self._st_ref.get("value"),
+                             # extra fields for the dashboard's live scanner panel
+                             "st_prev": self._st_ref.get("prev"),
+                             "pre_move": self._st_ref.get("pre_move"),
+                             "max_pre_move": bt.ST6_MAX_PRE_MOVE,
+                             "candle_close": ((self._st_ref["ts"] + timedelta(minutes=5)).strftime("%H:%M")
+                                              if self._st_ref.get("ts") is not None else None),
+                             "market_open": _market_open(_now()),
+                             "no_new_trade_time": NO_NEW_TRADE_TIME,
+                             "max_daily_loss": self.max_daily_loss,
+                             "daily_profit_target": self.daily_profit_target},
             "signal"      : self.sig_info,
             "position"    : pos,
             "daily_stats" : {
