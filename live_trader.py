@@ -349,7 +349,7 @@ def _load_scrip():
     return nifty_opts
 
 
-def _next_thursday():
+def _next_thursday(scrip=None):
     """
     NEXT week's Tuesday expiry (Nifty weekly expiry moved to Tuesday, NSE 2025)
     — deliberately one cycle further out than the nearest expiry. Trading the
@@ -360,8 +360,24 @@ def _next_thursday():
     backtest-validated — backtest.py's constant-delta P&L model doesn't
     simulate theta decay at all, so this can only be judged from live/paper
     results, not backtest numbers.
+
+    When the scrip master is passed, the expiry is taken from the contracts
+    actually listed (second-nearest expiry on or after today), so holiday-
+    shifted expiries work. A hardcoded Tuesday missed the Dussehra-shifted
+    Mon 19-Oct-2026 expiry and every entry 7-13 Oct failed "Option not found".
+    Falls back to the plain Tuesday calculation if the scrip is unavailable.
     """
     today = _today()
+    if scrip:
+        expiries = set()
+        for x in scrip:
+            try:
+                expiries.add(datetime.strptime(x["expiry"], "%d%b%Y").date())
+            except (KeyError, ValueError):
+                pass
+        upcoming = sorted(d for d in expiries if d >= today)
+        if len(upcoming) >= 2:
+            return upcoming[1]
     nearest = today + timedelta(days=2)
     for i in range(8):
         d = today + timedelta(days=i)
@@ -1119,7 +1135,7 @@ class AngelTrader:
             return False
 
         strike = force_strike if force_strike else int(round(spot / 50) * 50)
-        expiry = _next_thursday()
+        expiry = _next_thursday(self._scrip)
         token, symbol = _find_option(self._scrip, strike, opt_type, expiry)
         if not token:
             # Scan ±5 strikes (±250 pts) before giving up

@@ -305,7 +305,7 @@ def api_debug_scrip():
             matches = [x for x in scrip if "NIFTY" in x.get("symbol", "")][:20]
 
         from live_trader import _next_thursday, _expiry_tag
-        expiry = _next_thursday()
+        expiry = _next_thursday(scrip)
         tag    = _expiry_tag(expiry)
 
         return jsonify({
