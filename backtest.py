@@ -69,6 +69,13 @@ ST6_TRAIL_GIVEBACK     = 0.03  # once past ST6_TRAIL_LOCK_TRIGGER, exit if price
                                  # and consistently LOST money vs no partial --
                                  # letting the full qty run is what captures the
                                  # big trending days.
+ST6_TRAIL_GIVEBACK_ENABLED = False  # "steps only" (2026-10-17): above +32% the +10%
+                                 # floor applies instead of peak-minus-giveback. 7yr
+                                 # backtest (trail_variants_7yr_backtest.py, 5 lots):
+                                 # Rs.14.6L vs Rs.9.5L with the 3% giveback, smaller
+                                 # max drawdown, better in both 2020-23 and 2023-26;
+                                 # the 3% giveback sold winners at ~+33% on moves that
+                                 # often ran to +70-100%. True restores the old rule.
 ST6_NEG_REVERSAL_AGE_MIN  = 20  # NEG_REVERSAL_EXIT only fires once a position has been
                                  # open this many minutes -- 45d grid search (Sep 2026)
                                  # showed 20min/5% matches 10min/5%'s P&L (Rs.54,101 vs

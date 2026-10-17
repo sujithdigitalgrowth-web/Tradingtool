@@ -1761,6 +1761,8 @@ class AngelTrader:
                               can never close as a real loss for the day)
               peak >= 25% -> floor = +10%
               peak >= 32% -> floor = peak - GIVEBACK(3pts), continuous, no cap
+                              ONLY if bt.ST6_TRAIL_GIVEBACK_ENABLED; off since
+                              2026-10-17 ("steps only": the +10% floor applies)
             Chosen over the higher-EV "32%-only" version for the loss
             guarantee below 32% — backtested 45d (Aug 2026): Rs.43,905 vs
             Rs.33,562 doing nothing (Rs.51,905 for 32%-only, no guarantee);
@@ -1808,7 +1810,7 @@ class AngelTrader:
         if ltp is not None and entry > 0:
             peak_pct = (pos["trail_high"] - entry) / entry
             floor_pct = None
-            if peak_pct >= bt.ST6_TRAIL_LOCK_TRIGGER:
+            if bt.ST6_TRAIL_GIVEBACK_ENABLED and peak_pct >= bt.ST6_TRAIL_LOCK_TRIGGER:
                 floor_pct = peak_pct - bt.ST6_TRAIL_GIVEBACK
             elif peak_pct >= bt.ST6_STEP2_TRIGGER:
                 floor_pct = bt.ST6_STEP2_FLOOR
