@@ -469,6 +469,7 @@ class AngelTrader:
         # open, so _manage_position_supertrend and _check_signal_supertrend
         # can read the current flip state.
         self._st_ref = {"value": None, "prev": None, "ts": None}
+        self._nbees_cache = None   # closed NIFTYBEES 5m candles, see _fetch_nbees_only
 
         # Config (set by start())
         self.max_trades   = 2
@@ -930,11 +931,31 @@ class AngelTrader:
         computes it correctly-scaled. Supertrend flip direction itself is
         scale-invariant, so entry/exit timing wasn't affected — only the
         pre-move skip was dead code.
+
+        Cached to cut Angel historical-API load (in-market 403 rate-limit
+        refusals, Oct 2026): returns the cache untouched until a new 5m candle
+        has closed, and after the first full 12-day pull each day only
+        re-fetches today's candles. Live fetches retry 6 times (~28s).
         """
-        today    = _today()
-        lookback = today - timedelta(days=12)
-        return _trim_forming_candle(_fetch_intraday(self._auth, self._api_key, NIFTYBEES_TOKEN,
-                                                     lookback, today, multiplier=NIFTY_MULTIPLIER))
+        today = _today()
+        cache = self._nbees_cache
+        now = pd.Timestamp(_now()).tz_localize("Asia/Kolkata")
+        last_closed = now.floor("5min") - timedelta(minutes=5)   # start of newest closed candle
+        if cache is not None and not cache.empty and cache.index[-1] >= last_closed:
+            return cache
+
+        fresh_day = cache is None or cache.empty or cache.index[0].date() < today - timedelta(days=12)
+        start = today - timedelta(days=12) if fresh_day else today
+        df = _trim_forming_candle(_fetch_intraday(self._auth, self._api_key, NIFTYBEES_TOKEN,
+                                                   start, today, multiplier=NIFTY_MULTIPLIER,
+                                                   retries=6))
+        if df is None or df.empty:
+            return cache if cache is not None else df   # keep last good data on failure
+        if not fresh_day:
+            df = pd.concat([cache[cache.index.date < today], df])
+            df = df[~df.index.duplicated(keep="last")]
+        self._nbees_cache = df
+        return df
 
     # ── Signal detection ──────────────────────────────────────────
 

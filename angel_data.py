@@ -30,6 +30,12 @@ BANKBEES_MULTIPLIER = 100.0  # BANKBEES close × this ≈ BankNifty spot price (
 
 CHUNK_DAYS = 60            # safe chunk size for 5m API requests
 API_URL    = "https://apiconnect.angelbroking.com/rest/secure/angelbroking/historical/v1/getCandleData"
+# Same endpoint on Angel's current domain. Retries alternate between the two:
+# in-market 403 "exceeding access rate" refusals (2,112 on NIFTYBEES in Oct
+# 2026 at only ~1 request/min from this process) are on Angel's side, and a
+# different edge host gives the retry a better chance.
+API_URL_ALT = "https://apiconnect.angelone.in/rest/secure/angelbroking/historical/v1/getCandleData"
+RETRY_DELAYS = [2, 3, 5, 8, 10]   # seconds between attempts (live signal fetch uses all)
 
 
 def _local_ip() -> str:
@@ -114,17 +120,22 @@ def _fetch_chunk(auth_token: str, api_key: str, token: str, exchange: str,
     hdrs = _headers(auth_token, api_key)
     for attempt in range(retries):
         resp = None
+        url = API_URL if attempt % 2 == 0 else API_URL_ALT
         try:
-            resp = requests.post(API_URL, headers=hdrs, json=body, timeout=15)
+            resp = requests.post(url, headers=hdrs, json=body, timeout=15)
             data = resp.json()
             if data.get("status") and data.get("data"):
                 return data["data"]
             logger.debug(f"Empty response token={token} attempt={attempt+1}: {data.get('message','')}")
         except Exception as e:
             status = resp.status_code if resp is not None else "?"
-            logger.warning(f"Fetch error token={token} attempt={attempt+1} status={status}: {e}")
+            snippet = resp.text[:100].replace("\n", " ") if resp is not None else ""
+            logger.warning(f"Fetch error token={token} attempt={attempt+1}/{retries} "
+                           f"host={url.split('/')[2]} status={status}: {e} body={snippet!r}")
         if attempt < retries - 1:
-            _time.sleep(2)
+            _time.sleep(RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)])
+    if retries > 1:
+        logger.error(f"Fetch FAILED token={token} after {retries} attempts")
     return []
 
 
@@ -155,7 +166,8 @@ def _to_df(raw: list, multiplier: float = 1.0) -> pd.DataFrame:
 
 
 def _fetch_intraday(auth_token: str, api_key: str, token: str,
-                    start: date, end: date, multiplier: float = 1.0) -> pd.DataFrame:
+                    start: date, end: date, multiplier: float = 1.0,
+                    retries: int = 3) -> pd.DataFrame:
     """Fetch 5m data in CHUNK_DAYS blocks. Applies optional multiplier."""
     all_rows = []
     chunk_start = datetime.combine(start, datetime.min.time().replace(hour=9, minute=15))
@@ -168,7 +180,7 @@ def _fetch_intraday(auth_token: str, api_key: str, token: str,
         )
         logger.info(f"  Fetching token={token} {chunk_start.date()} -> {chunk_end.date()}")
         rows = _fetch_chunk(auth_token, api_key, token, "NSE",
-                            "FIVE_MINUTE", chunk_start, chunk_end)
+                            "FIVE_MINUTE", chunk_start, chunk_end, retries=retries)
         all_rows.extend(rows)
         chunk_start = chunk_end + timedelta(minutes=5)
         _time.sleep(0.4)
