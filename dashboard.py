@@ -581,7 +581,8 @@ TEMPLATE = r"""
   @keyframes blip{0%{opacity:0;transform:translate(-50%,-50%) scale(.3)}15%{opacity:1;transform:translate(-50%,-50%) scale(1.4)}100%{opacity:0;transform:translate(-50%,-50%) scale(.8)}}
   .scan-step{display:flex;align-items:center;gap:10px;font-size:13px;padding:7px 10px;border-radius:10px;background:#faf9ff;border:1px solid #f0ecfb}
   .scan-step .dot{width:9px;height:9px;border-radius:9999px;background:#d6d1ea;flex-shrink:0}
-  .scan-step .lbl{color:#5b5578;font-weight:600}
+  .scan-step .lbl{color:#5b5578;font-weight:600;white-space:nowrap}
+  @media (max-width:640px){.scan-step{font-size:12px;padding:7px 8px;gap:8px}}
   .scan-step .val{margin-left:auto;font-weight:700;color:#1e1b2e;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .scan-step.ok .dot{background:#22c55e}
   .scan-step.wait .dot{background:#7c3aed;animation:pulse 1.2s infinite}
@@ -645,6 +646,26 @@ TEMPLATE = r"""
   .hx-trade.open .hx-details{display:grid}
   @keyframes hxIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
   @media (prefers-reduced-motion:reduce){.hx-trade{animation:none}.hx-ring,.hx-bar span{transition:none}}
+  .cal-cell,.cal-blank{min-height:92px}
+  .cal-cell{display:flex;flex-direction:column;padding:8px 10px;min-width:0;overflow:hidden}
+  .cal-top{display:flex;align-items:center;gap:4px}
+  .cal-day{font-size:12px;font-weight:700;color:#4b4563}
+  .cal-trophy{font-size:12px;line-height:1}
+  .cal-ct{margin-left:auto;font-size:10px;font-weight:700;color:#6b6588;background:rgba(255,255,255,.75);
+    border-radius:9999px;min-width:18px;height:18px;padding:0 5px;display:inline-flex;align-items:center;justify-content:center}
+  .cal-amt{margin-top:auto;font-size:15px;font-weight:800;line-height:1.15;white-space:nowrap;letter-spacing:-.01em}
+  .cal-pct{font-size:11px;font-weight:600;opacity:.8;margin-top:1px}
+  .cal-short{display:none}
+  @media (max-width:1100px){.cal-amt{font-size:13px}}
+  @media (max-width:640px){
+    .cal-cell,.cal-blank{min-height:54px}
+    .cal-cell{padding:5px 4px;border-radius:8px;align-items:center;text-align:center}
+    .cal-top{justify-content:center}
+    .cal-day{font-size:11px}
+    .cal-ct,.cal-pct,.cal-full{display:none}
+    .cal-short{display:inline}
+    .cal-amt{font-size:11px}
+  }
   .cal-cell{cursor:default}
   .cal-cell.has-trades{cursor:pointer}
   .cal-cell.has-trades:hover{box-shadow:0 2px 8px rgba(0,0,0,.08)}
@@ -653,17 +674,17 @@ TEMPLATE = r"""
 <body class="min-h-screen">
 
 <!-- ── Header ── -->
-<div class="bg-white/80 backdrop-blur border-b border-violet-100 px-6 py-3 sticky top-0 z-10">
+<div class="bg-white/80 backdrop-blur border-b border-violet-100 px-4 sm:px-6 py-3 sticky top-0 z-10">
   <div class="flex items-center justify-between flex-wrap gap-3">
-    <div class="flex items-center gap-3">
-      <p class="text-sm font-bold text-gray-900">NIFTY 50</p>
-      <p id="hdr-nifty" class="text-lg font-bold text-gray-900">—</p>
+    <div class="flex flex-wrap items-center gap-x-2 sm:gap-x-3 gap-y-1 min-w-0">
+      <p class="text-xs sm:text-sm font-bold text-gray-900 whitespace-nowrap">NIFTY 50</p>
+      <p id="hdr-nifty" class="text-base sm:text-lg font-bold text-gray-900">—</p>
       <span class="w-px h-5 bg-gray-200"></span>
-      <p class="text-sm font-bold text-gray-900">VIX</p>
-      <p id="hdr-vix" class="text-lg font-bold text-gray-900">—</p>
+      <p class="text-xs sm:text-sm font-bold text-gray-900">VIX</p>
+      <p id="hdr-vix" class="text-base sm:text-lg font-bold text-gray-900">—</p>
       <span class="w-px h-5 bg-gray-200"></span>
-      <p class="text-sm font-bold text-gray-900">PCR</p>
-      <p id="hdr-pcr" class="text-lg font-bold text-gray-900">—</p>
+      <p class="text-xs sm:text-sm font-bold text-gray-900">PCR</p>
+      <p id="hdr-pcr" class="text-base sm:text-lg font-bold text-gray-900">—</p>
     </div>
     <div class="flex items-center gap-5">
       <!-- Balance -->
@@ -680,14 +701,14 @@ TEMPLATE = r"""
 </div>
 
 <!-- ── Tabs ── -->
-<div class="flex px-6 pt-3 border-b border-violet-100 bg-white/60">
-  <button onclick="switchTab('live')"    id="tab-live"    class="tab-a  px-5 py-2 text-sm font-semibold">Live Trading</button>
-  <button onclick="switchTab('history')" id="tab-history" class="tab-i  px-5 py-2 text-sm font-semibold">Trade History</button>
-  <button onclick="switchTab('index')"   id="tab-index"   class="tab-i  px-5 py-2 text-sm font-semibold">Index</button>
+<div class="flex px-2 sm:px-6 pt-3 border-b border-violet-100 bg-white/60">
+  <button onclick="switchTab('live')"    id="tab-live"    class="tab-a px-3 sm:px-5 py-2 text-sm font-semibold">Live Trading</button>
+  <button onclick="switchTab('history')" id="tab-history" class="tab-i px-3 sm:px-5 py-2 text-sm font-semibold">Trade History</button>
+  <button onclick="switchTab('index')"   id="tab-index"   class="tab-i px-3 sm:px-5 py-2 text-sm font-semibold">Index</button>
 </div>
 
 <!-- ══════════════ LIVE TAB ══════════════ -->
-<div id="pane-live" class="p-5 space-y-4">
+<div id="pane-live" class="p-3 sm:p-5 space-y-4">
 
   <!-- ── Market session timeline ── -->
   <div class="card px-5 py-3">
@@ -752,9 +773,9 @@ TEMPLATE = r"""
           <p class="text-2xl font-extrabold text-gray-900 mt-1">✓ Trade executed</p>
           <p id="exec-detail" class="text-sm text-gray-600 mt-1"></p>
         </div>
-        <div class="flex items-center justify-between mb-4">
+        <div class="flex flex-wrap items-center justify-between gap-2 mb-4 whitespace-nowrap">
           <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold">Open Position</p>
-          <div class="flex items-center gap-2">
+          <div class="flex flex-wrap items-center gap-2">
             <span id="pos-badge" class="text-xs font-bold px-2.5 py-0.5 rounded-full bg-blue-100 text-blue-700">CE</span>
             <button id="btn-add-lot" onclick="addLot()"
               class="text-xs font-bold px-3 py-1 rounded-full bg-green-100 text-green-700 hover:bg-green-200 transition">
@@ -1008,7 +1029,7 @@ TEMPLATE = r"""
 
 
 <!-- ══════════════ TRADE HISTORY TAB ══════════════ -->
-<div id="pane-history" class="p-5 hidden space-y-4">
+<div id="pane-history" class="p-3 sm:p-5 hidden space-y-4">
 
   <!-- Date range -->
   <div class="card p-4">
@@ -1086,11 +1107,11 @@ TEMPLATE = r"""
   </div>
 
   <!-- Calendar -->
-  <div class="card p-4">
-    <div class="grid grid-cols-7 gap-2 text-center text-xs font-bold text-gray-400 mb-2">
+  <div class="card p-2 sm:p-4">
+    <div class="grid grid-cols-7 gap-1 sm:gap-2 text-center text-[10px] sm:text-xs font-bold text-gray-400 mb-2">
       <div>MON</div><div>TUE</div><div>WED</div><div>THU</div><div>FRI</div><div>SAT</div><div>SUN</div>
     </div>
-    <div id="cal-grid" class="grid grid-cols-7 gap-2"></div>
+    <div id="cal-grid" class="grid grid-cols-7 gap-1 sm:gap-2"></div>
   </div>
 
   <!-- Legend -->
@@ -1120,7 +1141,7 @@ TEMPLATE = r"""
 </div><!-- /pane-history -->
 
 <!-- ══════════════ INDEX TAB ══════════════ -->
-<div id="pane-index" class="p-5 hidden space-y-4">
+<div id="pane-index" class="p-3 sm:p-5 hidden space-y-4">
   <div class="flex items-center justify-between px-1">
     <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold">Market Indices</p>
     <p id="idx-updated" class="text-xs text-gray-400">NSE &amp; BSE &middot; Last updated —</p>
@@ -1231,7 +1252,7 @@ function switchTab(name){
   ['live','history','index'].forEach(t=>{
     document.getElementById('pane-'+t).classList.toggle('hidden',t!==name);
     document.getElementById('tab-'+t).className=
-      (t===name?'tab-a':'tab-i')+' px-5 py-2 text-sm font-semibold';
+      (t===name?'tab-a':'tab-i')+' px-3 sm:px-5 py-2 text-sm font-semibold';
   });
   if(name==='history')      renderCalendar();
   if(name==='index')        loadIndices();
@@ -1392,7 +1413,7 @@ function renderCalendar(){
         const ds = calFmt(cur);
         const inMonth   = cur.getMonth()===month;
         if(!inMonth){   // days of the neighbouring months: keep the grid aligned, show nothing
-          html += '<div class="min-h-[92px]" aria-hidden="true"></div>';
+          html += '<div class="cal-blank" aria-hidden="true"></div>';
           cur.setDate(cur.getDate()+1);
           continue;
         }
@@ -1401,27 +1422,27 @@ function renderCalendar(){
         // their own month's abbreviation so e.g. "31" isn't mistaken for a
         // day in the displayed month.
         const dayLabel = inMonth ? cur.getDate() : `${monthNames[cur.getMonth()].slice(0,3)} ${cur.getDate()}`;
-        let inner = `<p class="text-xs font-semibold ${inMonth?'text-gray-700':'text-gray-300'} mb-1.5">${dayLabel}</p>`;
-        let cellTone = 'bg-white border-gray-100', cellStyle = '';
+        let cellTone = 'bg-white border-gray-100', cellStyle = '', body = '', badge = '';
 
         if(dayTrades.length){
           const dayPnl = dayTrades.reduce((a,t)=>a+t.pnl,0);
           const dayCap = dayTrades.reduce((a,t)=>a+(t.capital||0),0);
           const dayPct = dayCap ? (dayPnl/dayCap*100) : 0;
-          cellTone = dayPnl>=0 ? 'border-green-200' : 'border-red-200';
-          const heat = inMonth ? (0.08 + 0.32*Math.min(1, Math.abs(dayPnl)/maxAbs)) : 0.06;
-          cellStyle = ` style="background:${dayPnl>=0?`rgba(34,197,94,${heat})`:`rgba(239,68,68,${heat})`}"`;
-          if(ds===bestDay) inner = inner.replace('</p>', ' <span title="Best day of the month">🏆</span></p>');
-          inner += `<p class="text-[10px] text-gray-500 mb-0.5">${dayTrades.length} trade${dayTrades.length>1?'s':''}</p>`;
-          inner += `<div class="space-y-0.5">
-              <div class="flex justify-between text-xs"><span class="text-gray-500 font-medium">Total P&amp;L</span>`+
-              `<span class="${cls(dayPnl)} font-bold">${dayPnl>=0?'+':''}${inr(dayPnl)}</span></div>
-              <div class="flex justify-between text-xs"><span class="text-gray-400">P&amp;L %</span>`+
-              `<span class="${cls(dayPnl)} font-semibold">${dayPnl>=0?'+':''}${dayPct.toFixed(1)}%</span></div>
-            </div>`;
+          const up = dayPnl>=0, sgn = up ? '+' : '−', abs = Math.abs(dayPnl);
+          cellTone = up ? 'border-green-200' : 'border-red-200';
+          const heat = 0.08 + 0.30*Math.min(1, abs/maxAbs);
+          cellStyle = ` style="background:${up?`rgba(34,197,94,${heat})`:`rgba(239,68,68,${heat})`}"`;
+          const short = abs>=1e5 ? (abs/1e5).toFixed(1)+'L' : abs>=1e3 ? (abs/1e3).toFixed(1)+'K' : Math.round(abs);
+          const tone = up ? 'text-green-700' : 'text-red-600';
+          badge = (ds===bestDay ? '<span class="cal-trophy" title="Best day of the month">🏆</span>' : '') +
+                  `<span class="cal-ct" title="${dayTrades.length} trade${dayTrades.length>1?'s':''}">${dayTrades.length}</span>`;
+          body = `<p class="cal-amt ${tone}"><span class="cal-full">${sgn}₹${Math.round(abs).toLocaleString('en-IN')}</span>`+
+                 `<span class="cal-short">${sgn}${short}</span></p>`+
+                 `<p class="cal-pct ${tone}">${sgn}${Math.abs(dayPct).toFixed(1)}%</p>`;
         }
+        const inner = `<div class="cal-top"><span class="cal-day">${dayLabel}</span>${badge}</div>${body}`;
 
-        const cellClass  = `cal-cell rounded-lg border p-2 min-h-[92px] ${cellTone}` + (dayTrades.length ? ' has-trades' : '');
+        const cellClass  = `cal-cell rounded-lg border ${cellTone}` + (dayTrades.length ? ' has-trades' : '');
         const onclickAttr = dayTrades.length ? ` onclick="openDayModal('${ds}')"` : '';
         html += `<div class="${cellClass}"${cellStyle}${onclickAttr}>${inner}</div>`;
         cur.setDate(cur.getDate()+1);
@@ -1591,8 +1612,8 @@ function renderTimeline(){
           <span class="text-xs text-gray-400">${t.time||''} → ${t.exit_time||''}${dur!=null?' · '+fmtDur(dur):''}</span>
           ${t.paper?'<span class="text-xs bg-blue-50 text-blue-600 px-1.5 rounded">Paper</span>':''}
         </div>
-        <div class="flex items-center gap-3 mt-2">
-          <div class="hx-ret flex-1"><span style="${bar}"></span></div>
+        <div class="flex flex-wrap items-center gap-x-3 gap-y-1.5 mt-2">
+          <div class="hx-ret flex-1 basis-full sm:basis-0"><span style="${bar}"></span></div>
           <span class="text-xs text-gray-500 whitespace-nowrap">${ico} ${label}</span>
         </div>
       </div>
@@ -2013,7 +2034,7 @@ function renderScanner(s){
   if(!live){ ['data','trend','flip','move','risk'].forEach(k=>setStep(k,'', '—')); }
   else {
     setStep('data', s.connected&&mkt.nifty_ltp ? 'ok':'wait',
-      s.connected&&mkt.nifty_ltp ? 'Nifty ₹'+Number(mkt.nifty_ltp).toLocaleString('en-IN',{maximumFractionDigits:2})
+      s.connected&&mkt.nifty_ltp ? '₹'+Number(mkt.nifty_ltp).toLocaleString('en-IN',{maximumFractionDigits:0})
         +(mkt.candle_close?' · candle '+mkt.candle_close:'') : 'connecting…');
     setStep('trend', mkt.st_trend==null?'wait':'ok',
       mkt.st_trend===1?'Uptrend ▲':mkt.st_trend===-1?'Downtrend ▼':'warming up…');
@@ -2096,7 +2117,8 @@ function renderSession(s){
   if(pos.active && pos.entry_time) marks.push({at:pos.entry_time.slice(0,5), bg:pos.side==='CE'?'#2563eb':'#d97706', txt:'↗', tip:`${pos.side} open since ${pos.entry_time}`});
   document.getElementById('sess-marks').innerHTML = marks.map(m=>
     `<span class="sess-mark" style="left:${sessPct(m.at)}%;background:${m.bg}" title="${m.tip}">${m.txt}</span>`).join('');
-  document.getElementById('sess-ticks').innerHTML = [['09:15','09:15'],['11:00','11:00'],['13:00','13:00'],[cut,cut+' cutoff'],[sq,sq+' sq-off']]
+  document.getElementById('sess-ticks').innerHTML = [['09:15','09:15'],['11:00','11:00'],['13:00','13:00'],
+      [cut,cut+'<span class="hidden sm:inline"> cutoff</span>'],[sq,sq+'<span class="hidden sm:inline"> sq-off</span>']]
     .map(([t,l])=>`<span class="sess-tick" style="left:${sessPct(t)}%">${l}</span>`).join('');
 }
 
@@ -2125,7 +2147,9 @@ function renderCockpit(s){
   pk.classList.toggle('hidden', peak<=0.005); pk.style.left = P(peak)+'%';
   const fl = document.getElementById('lad-floor');
   fl.classList.toggle('hidden', floor==null); if(floor!=null) fl.style.left = P(floor)+'%';
-  document.getElementById('lad-ticks').innerHTML = [[0,'entry'],[t1,'+'+Math.round(t1*100)+'% → lock 0%'],[t2,'+'+Math.round(t2*100)+'% → lock +10%']]
+  document.getElementById('lad-ticks').innerHTML = [[0,'entry'],
+      [t1,'+'+Math.round(t1*100)+'%<span class="hidden sm:inline"> → lock 0%</span>'],
+      [t2,'+'+Math.round(t2*100)+'%<span class="hidden sm:inline"> → lock +10%</span>']]
     .map(([v,l])=>`<span class="sess-tick" style="left:${P(v)}%">${l}</span>`).join('');
   const st = document.getElementById('lad-status');
   if(floor==null){ st.textContent = `Next: +${Math.round(t1*100)}% locks breakeven (${((t1-cur)*100).toFixed(1)}% away)`; st.className='text-xs font-bold text-gray-500'; }
