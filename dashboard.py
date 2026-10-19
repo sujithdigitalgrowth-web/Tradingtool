@@ -547,55 +547,93 @@ TEMPLATE = r"""
   #sell-modal-bg.open{display:flex}
   #funds-modal-bg{display:none;position:fixed;inset:0;background:rgba(30,27,46,.5);z-index:50;align-items:center;justify-content:center}
   #funds-modal-bg.open{display:flex}
-  /* ── Artha Scanner ── */
-  .scan-card{--accent:#7c3aed;--accent-soft:rgba(124,58,237,.14);transition:box-shadow .4s}
-  .scan-card[data-mode="scanning"]{box-shadow:0 1px 2px rgba(76,29,149,.05),0 8px 28px rgba(124,58,237,.12)}
-  .scan-card[data-mode="found"]{--accent:#16a34a;--accent-soft:rgba(22,163,74,.16);
-    box-shadow:0 0 0 2px #86efac,0 10px 30px rgba(22,163,74,.18)}
-  .scan-card[data-mode="skipped"]{--accent:#d97706;--accent-soft:rgba(217,119,6,.14)}
-  .scan-card[data-mode="halted"]{--accent:#dc2626;--accent-soft:rgba(220,38,38,.12)}
-  .scan-card[data-mode="idle"],.scan-card[data-mode="closed"]{--accent:#a39fc0;--accent-soft:rgba(163,159,192,.12)}
-  .scan-chip{font-size:11px;font-weight:800;letter-spacing:.08em;padding:3px 10px;border-radius:9999px;
-    color:var(--accent);background:var(--accent-soft)}
-  .scan-card[data-mode="scanning"] .scan-chip,.scan-card[data-mode="found"] .scan-chip{animation:pulse 1.6s infinite}
-  .radar{position:relative;width:168px;height:168px;border-radius:9999px;overflow:hidden;
-    background:radial-gradient(circle,#fff 0%,#faf8ff 55%,#f1ecfe 100%);border:1px solid #e9e4fb}
-  .radar-ring{position:absolute;border:1px solid var(--accent-soft);border-radius:9999px;inset:0;margin:auto}
-  .radar-ring.r1{width:33%;height:33%}.radar-ring.r2{width:66%;height:66%}.radar-ring.r3{width:96%;height:96%}
-  .radar-cross{position:absolute;inset:0;background:
-    linear-gradient(var(--accent-soft),var(--accent-soft)) center/1px 100% no-repeat,
-    linear-gradient(var(--accent-soft),var(--accent-soft)) center/100% 1px no-repeat}
-  .radar-sweep{position:absolute;inset:0;border-radius:9999px;opacity:0;
-    background:conic-gradient(from 0deg,transparent 0deg,transparent 290deg,var(--accent-soft) 330deg,var(--accent) 360deg);
-    -webkit-mask:radial-gradient(circle,#000 69%,transparent 70%);mask:radial-gradient(circle,#000 69%,transparent 70%)}
-  .scan-card[data-mode="scanning"] .radar-sweep,.scan-card[data-mode="skipped"] .radar-sweep{opacity:.55;animation:sweep 3s linear infinite}
-  .scan-card[data-mode="found"] .radar-sweep{opacity:.7;animation:sweep .8s linear infinite}
-  @keyframes sweep{to{transform:rotate(360deg)}}
-  .radar-core{position:absolute;inset:0;margin:auto;width:42px;height:42px;border-radius:9999px;background:#fff;
-    border:2px solid var(--accent);display:flex;align-items:center;justify-content:center;
-    color:var(--accent);font-size:18px;font-weight:800;box-shadow:0 0 0 6px var(--accent-soft)}
-  .scan-card[data-mode="found"] .radar-core{animation:corePing 1s ease-out infinite}
-  @keyframes corePing{0%{box-shadow:0 0 0 0 rgba(22,163,74,.45)}100%{box-shadow:0 0 0 22px rgba(22,163,74,0)}}
-  .blip{position:absolute;width:7px;height:7px;border-radius:9999px;background:var(--accent);
+  /* ── Artha Core (scanner) ── */
+  .ai-card{--accent:#8b7cf6;--accent-rgb:139,124,246;position:relative;overflow:hidden;border-radius:18px;padding:20px 20px 52px;color:#e9e7ff;
+    background:radial-gradient(120% 90% at 15% 0%,#241b52 0%,transparent 55%),linear-gradient(150deg,#0b0a1d 0%,#130f2e 55%,#1a1140 100%);
+    border:1px solid rgba(var(--accent-rgb),.35);box-shadow:0 10px 40px rgba(var(--accent-rgb),.18),inset 0 0 60px rgba(var(--accent-rgb),.06);
+    transition:border-color .5s,box-shadow .5s}
+  .ai-card[data-mode="scanning"]{--accent:#22d3ee;--accent-rgb:34,211,238}
+  .ai-card[data-mode="found"]{--accent:#34d399;--accent-rgb:52,211,153}
+  .ai-card[data-mode="skipped"]{--accent:#fbbf24;--accent-rgb:251,191,36}
+  .ai-card[data-mode="halted"]{--accent:#f87171;--accent-rgb:248,113,113}
+  .ai-card[data-mode="idle"]{--accent:#64748b;--accent-rgb:100,116,139}
+  .ai-grid{position:absolute;inset:0;pointer-events:none;opacity:.35;
+    background-image:linear-gradient(rgba(var(--accent-rgb),.10) 1px,transparent 1px),linear-gradient(90deg,rgba(var(--accent-rgb),.10) 1px,transparent 1px);
+    background-size:28px 28px;-webkit-mask:radial-gradient(ellipse at 30% 40%,#000 30%,transparent 75%);mask:radial-gradient(ellipse at 30% 40%,#000 30%,transparent 75%)}
+  .ai-scan{position:absolute;left:0;right:0;height:80px;top:-80px;pointer-events:none;
+    background:linear-gradient(180deg,transparent,rgba(var(--accent-rgb),.10),transparent);animation:aiScan 6s linear infinite}
+  @keyframes aiScan{to{top:100%}}
+  .ai-kicker{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;letter-spacing:.18em;color:rgba(233,231,255,.6);font-weight:700}
+  .ai-led{width:8px;height:8px;border-radius:9999px;background:var(--accent);box-shadow:0 0 10px var(--accent);animation:pulse 1.4s infinite}
+  .ai-chip{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;font-weight:800;letter-spacing:.14em;padding:4px 10px;border-radius:6px;
+    color:var(--accent);background:rgba(var(--accent-rgb),.12);border:1px solid rgba(var(--accent-rgb),.45);text-shadow:0 0 8px rgba(var(--accent-rgb),.6)}
+  .ai-title{font-size:20px;font-weight:800;color:#fff;letter-spacing:-.01em}
+  .ai-sub{font-size:12px;color:rgba(233,231,255,.62);margin-top:2px}
+  /* core orb */
+  .ai-orb{position:relative;width:184px;height:184px;flex-shrink:0}
+  .ai-orb-inner{position:absolute;left:0;top:0;width:184px;height:184px;transform-origin:0 0}
+  .ai-orb svg{position:absolute;inset:0;width:184px;height:184px;overflow:visible}
+  .ai-orb .ring{fill:none;stroke:var(--accent);transform-origin:92px 92px;transition:stroke .5s}
+  .ai-orb .r1{stroke-opacity:.55;stroke-width:1.2;stroke-dasharray:3 9;animation:spin 22s linear infinite}
+  .ai-orb .r2{stroke-opacity:.8;stroke-width:2;stroke-dasharray:60 30 8 30;animation:spin 9s linear infinite reverse}
+  .ai-orb .r3{stroke-opacity:.35;stroke-width:1;stroke-dasharray:1 5;animation:spin 14s linear infinite}
+  .ai-orb .r4{stroke-opacity:.9;stroke-width:3;stroke-dasharray:22 140;stroke-linecap:round;animation:spin 3.2s linear infinite}
+  .ai-orb .orbit{transform-origin:92px 92px}
+  .ai-orb .o1{animation:spin 5s linear infinite}.ai-orb .o2{animation:spin 8s linear infinite reverse}.ai-orb .o3{animation:spin 12s linear infinite}
+  .ai-orb .orbit circle{fill:var(--accent);filter:drop-shadow(0 0 4px var(--accent))}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .ai-sweep{position:absolute;left:16px;top:16px;width:152px;height:152px;border-radius:9999px;opacity:.5;
+    background:conic-gradient(from 0deg,transparent 0deg,transparent 280deg,rgba(var(--accent-rgb),.05) 300deg,rgba(var(--accent-rgb),.55) 360deg);
+    animation:spin 3s linear infinite}
+  .ai-core{position:absolute;left:63px;top:63px;width:58px;height:58px;border-radius:9999px;display:flex;align-items:center;justify-content:center;
+    background:radial-gradient(circle at 35% 30%,rgba(255,255,255,.35),rgba(var(--accent-rgb),.55) 45%,rgba(var(--accent-rgb),.15) 75%);
+    border:1px solid rgba(var(--accent-rgb),.8);color:#fff;font-size:20px;font-weight:800;text-shadow:0 0 10px var(--accent);
+    box-shadow:0 0 24px rgba(var(--accent-rgb),.65),0 0 60px rgba(var(--accent-rgb),.25);animation:breathe 2.6s ease-in-out infinite}
+  @keyframes breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.07)}}
+  /* standby: same motion, slower and dimmer; signal: fast */
+  .ai-card[data-mode="closed"] .ring,.ai-card[data-mode="idle"] .ring,
+  .ai-card[data-mode="closed"] .orbit,.ai-card[data-mode="idle"] .orbit,
+  .ai-card[data-mode="closed"] .ai-sweep,.ai-card[data-mode="idle"] .ai-sweep{animation-duration:16s}
+  .ai-card[data-mode="closed"] .ai-sweep,.ai-card[data-mode="idle"] .ai-sweep{opacity:.22}
+  .ai-card[data-mode="found"] .ai-sweep{animation-duration:.8s;opacity:.75}
+  .ai-card[data-mode="found"] .ai-core{animation:corePing 1s ease-out infinite}
+  @keyframes corePing{0%{box-shadow:0 0 0 0 rgba(52,211,153,.7)}100%{box-shadow:0 0 0 30px rgba(52,211,153,0)}}
+  .blip{position:absolute;width:6px;height:6px;border-radius:9999px;background:var(--accent);box-shadow:0 0 8px var(--accent);
     transform:translate(-50%,-50%);animation:blip 2.4s ease-out forwards}
-  @keyframes blip{0%{opacity:0;transform:translate(-50%,-50%) scale(.3)}15%{opacity:1;transform:translate(-50%,-50%) scale(1.4)}100%{opacity:0;transform:translate(-50%,-50%) scale(.8)}}
-  .scan-step{display:flex;align-items:center;gap:10px;font-size:13px;padding:7px 10px;border-radius:10px;background:#faf9ff;border:1px solid #f0ecfb}
-  .scan-step .dot{width:9px;height:9px;border-radius:9999px;background:#d6d1ea;flex-shrink:0}
-  .scan-step .lbl{color:#5b5578;font-weight:600;white-space:nowrap}
-  @media (max-width:640px){.scan-step{font-size:12px;padding:7px 8px;gap:8px}}
-  .scan-step .val{margin-left:auto;font-weight:700;color:#1e1b2e;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .scan-step.ok .dot{background:#22c55e}
-  .scan-step.wait .dot{background:#7c3aed;animation:pulse 1.2s infinite}
-  .scan-step.warn{background:#fffbeb;border-color:#fde68a}.scan-step.warn .dot{background:#f59e0b}
-  .scan-step.bad{background:#fef2f2;border-color:#fecaca}.scan-step.bad .dot{background:#ef4444}
-  .scan-step.hit{background:#f0fdf4;border-color:#86efac}.scan-step.hit .dot{background:#16a34a;animation:pulse .8s infinite}
-  .scan-ticker::before{content:'›_ ';color:var(--accent);font-weight:800}
+  @keyframes blip{0%{opacity:0;transform:translate(-50%,-50%) scale(.3)}15%{opacity:1;transform:translate(-50%,-50%) scale(1.5)}100%{opacity:0;transform:translate(-50%,-50%) scale(.8)}}
+  /* modules */
+  .scan-step{display:flex;align-items:center;gap:9px;font-size:12px;padding:8px 10px;border-radius:10px;min-width:0;
+    background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);transition:background .4s,border-color .4s}
+  .scan-step .dot{width:8px;height:8px;border-radius:9999px;background:#475569;flex-shrink:0}
+  .scan-step .lbl{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:rgba(233,231,255,.55);white-space:nowrap}
+  .scan-step .val{margin-left:auto;font-weight:700;color:#f5f3ff;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .scan-step.ok .dot{background:#34d399;box-shadow:0 0 8px #34d399}
+  .scan-step.wait .dot{background:#22d3ee;box-shadow:0 0 8px #22d3ee;animation:pulse 1.2s infinite}
+  .scan-step.idle .dot{background:#8b7cf6;box-shadow:0 0 6px #8b7cf6;animation:pulse 2.6s infinite}
+  .scan-step.warn{border-color:rgba(251,191,36,.45);background:rgba(251,191,36,.07)}.scan-step.warn .dot{background:#fbbf24;box-shadow:0 0 8px #fbbf24}
+  .scan-step.bad{border-color:rgba(248,113,113,.5);background:rgba(248,113,113,.08)}.scan-step.bad .dot{background:#f87171;box-shadow:0 0 8px #f87171}
+  .scan-step.hit{border-color:rgba(52,211,153,.6);background:rgba(52,211,153,.10)}.scan-step.hit .dot{background:#34d399;box-shadow:0 0 10px #34d399;animation:pulse .8s infinite}
+  /* terminal */
+  .ai-term{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;line-height:1.6;
+    background:rgba(0,0,0,.35);border:1px solid rgba(var(--accent-rgb),.25);border-radius:10px;padding:8px 10px;min-height:88px;overflow:hidden;
+    display:flex;flex-direction:column;justify-content:flex-end}
+  .ai-term p{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:rgba(233,231,255,.5)}
+  .ai-term p:last-child{color:#e9e7ff}
+  .ai-term .ts{color:var(--accent);opacity:.85}
+  .ai-caret{display:inline-block;width:7px;height:12px;background:var(--accent);vertical-align:-2px;margin-left:2px;animation:blink 1s steps(2) infinite}
+  @keyframes blink{50%{opacity:0}}
+  .ai-foot{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;color:rgba(233,231,255,.55)}
+  .ai-foot b{color:var(--accent);font-weight:700}
+  .ai-wave{position:absolute;left:0;right:0;bottom:0;width:100%;height:46px;pointer-events:none}
+  @media (max-width:640px){.ai-orb{width:150px;height:150px}.ai-orb-inner{transform:scale(.815)}
+    .ai-title{font-size:17px}.ai-card{padding:16px 16px 48px}}
+  @media (prefers-reduced-motion:reduce){.ai-card *{animation:none!important}}
   .exec-banner{position:absolute;inset:0;z-index:5;display:flex;flex-direction:column;align-items:center;justify-content:center;
     text-align:center;background:linear-gradient(135deg,#f0fdf4 0%,#ffffff 60%);animation:execOut 4.2s ease forwards}
   .exec-burst{position:absolute;width:90px;height:90px;border-radius:9999px;border:3px solid #22c55e;animation:burst 1.2s ease-out 3}
   @keyframes burst{0%{transform:scale(.4);opacity:1}100%{transform:scale(3.4);opacity:0}}
   @keyframes execOut{0%,80%{opacity:1}100%{opacity:0;visibility:hidden}}
-  @media (prefers-reduced-motion:reduce){.radar-sweep,.blip,.exec-burst,.radar-core,.scan-chip{animation:none!important}}
+  @media (prefers-reduced-motion:reduce){.exec-burst{animation:none!important}}
   /* ── Live tab: session strip, cockpit, daily gauge ── */
   .sess-track{position:relative;height:10px;border-radius:9999px;background:#f1effa;overflow:visible}
   .sess-fill{position:absolute;left:0;top:0;bottom:0;border-radius:9999px;width:0;
@@ -731,38 +769,48 @@ TEMPLATE = r"""
     <!-- ═══ LEFT: live trade details ═══ -->
     <div class="lg:col-span-2">
 
-      <!-- ── Live scanner (shown while no trade is open) ── -->
-      <div id="pos-empty" class="card scan-card p-5 h-full min-h-[260px]" data-mode="idle">
-        <div class="flex items-center justify-between mb-3">
-          <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold">Artha Scanner</p>
-          <span id="scan-chip" class="scan-chip">IDLE</span>
+      <!-- ── Artha Core: live scanner (shown while no trade is open) ── -->
+      <div id="pos-empty" class="ai-card h-full min-h-[300px] flex flex-col" data-mode="idle">
+        <div class="ai-grid"></div><div class="ai-scan"></div>
+        <div class="relative flex items-center justify-between mb-4">
+          <div class="flex items-center gap-2"><span class="ai-led"></span><p class="ai-kicker">ARTHA CORE · TREND ENGINE</p></div>
+          <span id="scan-chip" class="ai-chip">IDLE</span>
         </div>
-        <div class="flex flex-col md:flex-row gap-6 items-center md:items-stretch">
-          <!-- Radar -->
-          <div class="radar shrink-0" aria-hidden="true">
-            <div class="radar-ring r1"></div><div class="radar-ring r2"></div><div class="radar-ring r3"></div>
-            <div class="radar-cross"></div>
-            <div class="radar-sweep"></div>
+        <div class="relative flex-1 flex flex-col md:flex-row gap-6 items-center md:items-stretch">
+          <!-- Core -->
+          <div class="ai-orb md:self-center" aria-hidden="true"><div class="ai-orb-inner">
+            <svg viewBox="0 0 184 184">
+              <circle class="ring r1" cx="92" cy="92" r="88"/>
+              <circle class="ring r2" cx="92" cy="92" r="72"/>
+              <circle class="ring r3" cx="92" cy="92" r="56"/>
+              <circle class="ring r4" cx="92" cy="92" r="80"/>
+              <g class="orbit o1"><circle cx="92" cy="4" r="3"/></g>
+              <g class="orbit o2"><circle cx="92" cy="20" r="2.5"/></g>
+              <g class="orbit o3"><circle cx="92" cy="36" r="2"/></g>
+            </svg>
+            <div class="ai-sweep"></div>
             <div id="radar-blips"></div>
-            <div class="radar-core"><span id="radar-icon">◉</span></div>
-          </div>
-          <!-- Status + checklist -->
-          <div class="flex-1 w-full min-w-0">
-            <p id="scan-title" class="text-lg font-extrabold text-gray-900">Scanner idle</p>
-            <p id="scan-sub" class="text-xs text-gray-500 mt-0.5">Start the bot to begin scanning.</p>
-            <ul class="mt-4 space-y-2" id="scan-steps">
-              <li class="scan-step" id="step-data"><span class="dot"></span><span class="lbl">Market data</span><span class="val" id="val-data">—</span></li>
-              <li class="scan-step" id="step-trend"><span class="dot"></span><span class="lbl">Artha Trend</span><span class="val" id="val-trend">—</span></li>
-              <li class="scan-step" id="step-flip"><span class="dot"></span><span class="lbl">Trend flip</span><span class="val" id="val-flip">—</span></li>
-              <li class="scan-step" id="step-move"><span class="dot"></span><span class="lbl">Pre-move filter</span><span class="val" id="val-move">—</span></li>
-              <li class="scan-step" id="step-risk"><span class="dot"></span><span class="lbl">Risk limits</span><span class="val" id="val-risk">—</span></li>
+            <div class="ai-core"><span id="radar-icon">◉</span></div>
+          </div></div>
+          <!-- Status, modules, terminal -->
+          <div class="flex-1 w-full min-w-0 flex flex-col">
+            <p id="scan-title" class="ai-title">Engine offline</p>
+            <p id="scan-sub" class="ai-sub">Start the bot to begin scanning.</p>
+            <ul class="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2" id="scan-steps">
+              <li class="scan-step" id="step-data"><span class="dot"></span><span class="lbl">Data link</span><span class="val" id="val-data">—</span></li>
+              <li class="scan-step" id="step-trend"><span class="dot"></span><span class="lbl">Trend model</span><span class="val" id="val-trend">—</span></li>
+              <li class="scan-step" id="step-flip"><span class="dot"></span><span class="lbl">Flip detector</span><span class="val" id="val-flip">—</span></li>
+              <li class="scan-step" id="step-move"><span class="dot"></span><span class="lbl">Pre-move guard</span><span class="val" id="val-move">—</span></li>
+              <li class="scan-step sm:col-span-2" id="step-risk"><span class="dot"></span><span class="lbl">Risk engine</span><span class="val" id="val-risk">—</span></li>
             </ul>
-            <div class="mt-4 flex items-center justify-between gap-3">
-              <p id="scan-ticker" class="scan-ticker text-xs text-gray-500 truncate"></p>
-              <p class="text-xs text-gray-400 shrink-0">Next scan <span id="scan-next" class="font-bold text-violet-600 tabular-nums">—</span></p>
+            <div class="ai-term mt-3 flex-1" id="ai-term" aria-live="off"></div>
+            <div class="mt-2 flex items-center justify-between gap-3 ai-foot">
+              <span id="ai-uptime">heartbeat —</span>
+              <span>next scan <b id="scan-next" class="tabular-nums">—</b></span>
             </div>
           </div>
         </div>
+        <canvas id="ai-wave" class="ai-wave"></canvas>
       </div>
 
       <!-- ── Active Position ── -->
@@ -1921,16 +1969,26 @@ setInterval(refreshLive, 5000); refreshLive();
 // risk limits) from /api/live-state; nothing here makes trading decisions.
 let scanMode = 'idle', lastPosActive = null, tickerLines = [], tickerIdx = 0;
 const SCAN_TITLES = {
-  idle:     ['IDLE',     'Scanner idle'],
-  closed:   ['CLOSED',   'Market closed'],
+  idle:     ['OFFLINE',  'Engine offline'],
+  closed:   ['STANDBY',  'Standby · market closed'],
   scanning: ['SCANNING', 'Scanning the market'],
-  skipped:  ['FILTERED', 'Signal found — skipped'],
-  found:    ['SIGNAL',   'Signal found — executing'],
-  halted:   ['DONE',     'Done for today'],
+  skipped:  ['FILTERED', 'Signal detected · filtered'],
+  found:    ['SIGNAL',   'Signal locked · executing'],
+  halted:   ['DONE',     'Session complete'],
 };
+let aiCtx = {};   // latest state snapshot for the terminal / waveform
+function nextOpen(){   // next weekday 09:15 (exchange holidays not known here)
+  const now = new Date(), d = new Date(); d.setHours(9,15,0,0);
+  const wk = now.getDay()>=1 && now.getDay()<=5;
+  if(!(wk && now < d)) do { d.setDate(d.getDate()+1); } while(d.getDay()===0 || d.getDay()===6);
+  const ms = d-now, h = Math.floor(ms/3.6e6), m = Math.floor(ms%3.6e6/6e4), sec = Math.floor(ms%6e4/1e3);
+  return {label: d.toLocaleDateString('en-IN',{weekday:'short'})+' 09:15',
+          t: (h>=24?Math.floor(h/24)+'d ':'')+String(h%24).padStart(2,'0')+':'+String(m).padStart(2,'0')+':'+String(sec).padStart(2,'0')};
+}
 function setStep(id, state, text){
   const li = document.getElementById('step-'+id);
-  li.className = 'scan-step'+(state?' '+state:'');
+  ['ok','wait','idle','warn','bad','hit'].forEach(c=>li.classList.remove(c));
+  if(state) li.classList.add(state);
   document.getElementById('val-'+id).textContent = text;
 }
 // Preview only: ?demo=scanning|skipped|found|executed|position|halted fakes the
@@ -1967,6 +2025,7 @@ function demoState(s){
     d.signal.filter_reason='Skipped — Nifty already moved +38.4pt in the entry candle (>15pt cap)'; }
   if(DEMO==='found'){ d.market.st_prev=-1; d.signal.signal='BUY_CE'; d.signal.filter_reason=null; }
   if(DEMO==='position') openPos();
+  if(DEMO==='standby'){ d.market.market_open=false; d.market.st_trend=-1; d.market.st_prev=-1; }
   if(DEMO==='executed'){            // scanning → found → executed, looping every 20s
     const phase = demoTick++ % 4;
     if(phase===1){ d.market.st_prev=-1; d.signal.signal='BUY_CE'; d.signal.filter_reason=null; }
@@ -2006,7 +2065,8 @@ function renderScanner(s){
 
   let mode, sub;
   if(!running && status!=='MONITORING'){ mode='idle'; sub='Start the bot to begin scanning.'; }
-  else if(!mkt.market_open){ mode='closed'; sub='Scanning resumes at 09:15 on the next trading day.'; }
+  else if(!mkt.market_open){ mode='closed'; const no = nextOpen();
+    sub=`Engine online · next session ${no.label} (in ${no.t.slice(0,-3)})`; }
   else if(halted){ mode='halted';
     sub = /profit target/.test(reason) ? 'Daily profit target reached — gains locked in.'
         : /loss cap/.test(reason) ? 'Daily loss limit reached — protecting capital.'
@@ -2029,9 +2089,18 @@ function renderScanner(s){
   document.getElementById('radar-icon').textContent =
     mode==='found' ? '✓' : mode==='halted' ? '■' : mode==='skipped' ? '!' : mkt.st_trend===1 ? '▲' : mkt.st_trend===-1 ? '▼' : '◉';
 
-  // Checklist
+  // Modules
   const live = running && mkt.market_open;
-  if(!live){ ['data','trend','flip','move','risk'].forEach(k=>setStep(k,'', '—')); }
+  const trendTxt = mkt.st_trend===1 ? 'Uptrend ▲' : mkt.st_trend===-1 ? 'Downtrend ▼' : null;
+  if(mode==='idle'){ ['data','trend','flip','move','risk'].forEach(k=>setStep(k,'', 'offline')); }
+  else if(!live){   // standby: show what is armed, not dashes
+    setStep('data', 'idle', 'idle · market closed');
+    setStep('trend', 'idle', trendTxt ? 'last: '+trendTxt : 'reloads at 09:15');
+    setStep('flip', 'idle', 'standby');
+    setStep('move', 'idle', 'armed · ≤ '+(mkt.max_pre_move??15)+' pt');
+    const k = v => (Math.abs(v)/1000).toFixed(Math.abs(v)%1000 ? 1 : 0)+'K';
+    setStep('risk', 'idle', `armed · ${trades}/${maxT||'—'} trades · limits −${k(mkt.max_daily_loss??8000)} / +${k(mkt.daily_profit_target??6000)}`);
+  }
   else {
     setStep('data', s.connected&&mkt.nifty_ltp ? 'ok':'wait',
       s.connected&&mkt.nifty_ltp ? '₹'+Number(mkt.nifty_ltp).toLocaleString('en-IN',{maximumFractionDigits:0})
@@ -2052,31 +2121,96 @@ function renderScanner(s){
         : trades+'/'+maxT+' trades · '+(pnl>=0?'+':'')+inr(pnl));
   }
 
-  // Ticker: latest real activity first, then the scan pipeline
-  const latest = (s.activity||[])[0];
-  tickerLines = [];
-  if(latest) tickerLines.push(latest.time+'  '+latest.text);
-  if(mode==='scanning') tickerLines.push('Fetching NIFTY 5-minute candles…','Computing Artha Trend (10, 3)…',
-    'Checking for a trend flip…','Checking pre-move filter (≤ '+(mkt.max_pre_move??15)+' pt)…','Verifying risk limits…');
-  if(mode==='found') tickerLines = ['Signal confirmed: '+(sig.signal||'').replace('_',' '),'Selecting ATM strike & expiry…','Placing order…'];
-  if(!tickerLines.length) tickerLines = [sub];
+  // Terminal context + heartbeat (s.timestamp is the bot's own clock)
+  aiCtx = {mode, sub, trendTxt, flipSide, trades, maxT, pnl, mkt, sig, paper: s.paper_mode || status==='PAPER',
+           latest: (s.activity||[])[0]};
+  document.getElementById('ai-uptime').textContent =
+    mode==='idle' ? 'heartbeat · offline' : `heartbeat ${s.timestamp||'—'} · ok`;
 }
-function tickTicker(){
-  const el = document.getElementById('scan-ticker');
-  if(!el || !tickerLines.length) return;
-  tickerIdx = (tickerIdx+1) % tickerLines.length;
-  el.textContent = tickerLines[tickerIdx];
+
+// ── Artha Core terminal: a status line types in every ~1.7s ─────────
+let aiLines = [], aiStep = 0, aiLastMode = null;
+function aiNextLine(){
+  const c = aiCtx, m = c.mkt||{};
+  const L = {
+    idle:     ['engine offline · press ▶ Start Bot to arm', 'all modules powered down'],
+    closed:   ['heartbeat ok · engine online', 'data link idle · market closed',
+               'trend model loaded · '+(c.trendTxt ? 'last '+c.trendTxt : 'reloads at 09:15'),
+               `risk engine armed · ${c.trades}/${c.maxT||'—'} trades`,
+               ()=>{ const n = nextOpen(); return `next session ${n.label} · T-${n.t}`; }, 'standing by…'],
+    scanning: [()=> c.latest ? c.latest.time+' '+c.latest.text.toLowerCase() : 'scan cycle started',
+               'fetch NIFTYBEES 5m candles … ok',
+               'compute artha_trend(10, 3) → '+(c.trendTxt||'warming up'),
+               'flip detector: no flip on candle '+(m.candle_close||'—'),
+               m.pre_move==null ? 'pre-move guard: first candle · n/a'
+                                : `pre-move guard: ${m.pre_move>=0?'+':''}${Number(m.pre_move).toFixed(1)} pt ≤ ${m.max_pre_move??15} ✓`,
+               `risk engine: ${c.trades}/${c.maxT} trades · ${(c.pnl>=0?'+':'-')+inr(c.pnl||0)} ✓`,
+               ()=> 'sleeping until next candle · '+(document.getElementById('scan-next').textContent||'')],
+    skipped:  ['flip detected → '+c.flipSide, 'guard: '+(c.sub||''), 'entry vetoed · waiting for next flip'],
+    found:    ['SIGNAL '+((c.sig||{}).signal||'').replace('_',' ')+' locked', 'select ATM strike + next-week expiry…',
+               'route order ('+(c.paper?'paper':'LIVE')+')…'],
+    halted:   ['session complete · '+(c.sub||''), 'no new entries today', 'monitoring…'],
+  }[c.mode||'idle'] || ['…'];
+  if(c.mode !== aiLastMode){ aiStep = 0; aiLastMode = c.mode; }
+  const raw = L[aiStep++ % L.length];
+  return typeof raw === 'function' ? raw() : raw;
 }
-setInterval(tickTicker, 2200);
+function aiTick(){
+  const box = document.getElementById('ai-term');
+  if(!box || document.hidden) return;
+  const ts = new Date().toTimeString().slice(0,8);
+  aiLines.push({ts, text: aiNextLine()}); if(aiLines.length > 12) aiLines.shift();   // extra lines fill a taller card
+  const esc = t => String(t).replace(/[&<>]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]));
+  box.innerHTML = aiLines.map((l,i)=>`<p><span class="ts">[${l.ts}]</span> <span${i===aiLines.length-1?' id="ai-typing"':''}>${i===aiLines.length-1?'':esc(l.text)}</span>${i===aiLines.length-1?'<span class="ai-caret"></span>':''}</p>`).join('');
+  const el = document.getElementById('ai-typing'), full = aiLines[aiLines.length-1].text; let k = 0;
+  const type = () => { if(!el.isConnected) return; k = Math.min(full.length, k+3); el.textContent = full.slice(0,k); if(k < full.length) setTimeout(type, 18); };
+  type();
+}
+setInterval(aiTick, 1700);
+
 function spawnBlip(){
-  if(!['scanning','skipped','found'].includes(scanMode) || document.hidden) return;
+  if(document.hidden) return;
+  if(['closed','idle'].includes(scanMode) && Math.random() < 0.7) return;   // standby: occasional only
   const box = document.getElementById('radar-blips');
-  const a = Math.random()*Math.PI*2, r = 18+Math.random()*58;
+  const a = Math.random()*Math.PI*2, r = 24+Math.random()*58;
   const b = document.createElement('span');
-  b.className='blip'; b.style.left=(84+Math.cos(a)*r)+'px'; b.style.top=(84+Math.sin(a)*r)+'px';
+  b.className='blip'; b.style.left=(92+Math.cos(a)*r)+'px'; b.style.top=(92+Math.sin(a)*r)+'px';
   box.appendChild(b); setTimeout(()=>b.remove(), 2500);
 }
 setInterval(spawnBlip, 900);
+
+// ── Market-pulse waveform along the bottom of the Core card ─────────
+(function aiWave(){
+  const cv = document.getElementById('ai-wave'); if(!cv) return;
+  const ctx = cv.getContext('2d'); let t = 0;
+  const reduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const draw = () => {
+    if(!document.hidden && cv.offsetParent){
+      const dpr = window.devicePixelRatio||1, W = cv.clientWidth, H = cv.clientHeight;
+      if(cv.width !== W*dpr){ cv.width = W*dpr; cv.height = H*dpr; }
+      ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,W,H);
+      const card = document.getElementById('pos-empty');
+      const rgb = getComputedStyle(card).getPropertyValue('--accent-rgb').trim() || '139,124,246';
+      const m = scanMode, speed = m==='found' ? 4 : (m==='closed'||m==='idle') ? .6 : 1.6;
+      const amp = m==='found' ? 13 : (m==='closed'||m==='idle') ? 4 : 8;
+      t += reduce ? 0 : speed;
+      [[1, .9, 2], [.55, .35, 1]].forEach(([k, alpha, lw], j)=>{
+        ctx.beginPath();
+        for(let x=0; x<=W; x+=3){
+          const p = (x + t*(j?1.6:1)) / 38;
+          let y = Math.sin(p)*amp*k + Math.sin(p*2.7+j)*amp*.35*k;
+          const beat = ((x + t*2) % 260);                 // heartbeat spike travelling across
+          if(m!=='idle' && beat < 18) y -= Math.sin(beat/18*Math.PI)*amp*1.8*k;
+          ctx.lineTo(x, H/2 + y);
+        }
+        ctx.strokeStyle = `rgba(${rgb},${alpha})`; ctx.lineWidth = lw;
+        ctx.shadowColor = `rgba(${rgb},.8)`; ctx.shadowBlur = j ? 0 : 8; ctx.stroke();
+      });
+    }
+    requestAnimationFrame(draw);
+  };
+  requestAnimationFrame(draw);
+})();
 
 // ── Market session strip ─────────────────────────────────────────
 const hm2m = hm => { const [h,m] = (hm||'0:0').split(':').map(Number); return h*60+m; };
